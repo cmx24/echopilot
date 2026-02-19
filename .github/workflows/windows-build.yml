@@ -1,0 +1,77 @@
+﻿name: Windows Build and Release
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      APP_NAME: "XTTS Local"
+      EXE_NAME: "xtts_local.exe"
+      DIST_DIR: "dist/xtts_local"
+      ARTIFACT_NAME: "xtts_local_release"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install build tools
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install pyinstaller
+
+      - name: Prepare build folder
+        shell: pwsh
+        run: |
+          mkdir -Force build
+          mkdir -Force dist
+
+      - name: Run build script (PowerShell)
+        shell: pwsh
+        run: |
+          .\build\build.ps1
+
+      - name: List dist contents
+        shell: pwsh
+        run: |
+          Write-Output "=== dist contents ==="
+          Get-ChildItem -Recurse -Force .\dist | Format-List
+
+      - name: Create NSIS installer
+        shell: pwsh
+        run: |
+          choco install -y nsis
+          & "C:\Program Files (x86)\NSIS\makensis.exe" -V2 .\build\installer.nsi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: |
+            .\dist\xtts_local\**
+            .\xtts_local_installer.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Release ${{ github.run_number }}
+          body: Automated build from commit ${{ github.sha }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach artifacts to Release
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./xtts_local_installer.exe
+          asset_name: xtts_local_installer.exe
+          asset_content_type: application/octet-stream

@@ -1,0 +1,3 @@
+﻿# Add runtime dependencies here, e.g.:
+# pyttsx3==2.90
+# numpy==1.26.0
