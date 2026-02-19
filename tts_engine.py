@@ -1,1 +1,135 @@
-import torchaudio\nfrom TTS.utils.generic_utils import download_model\nfrom TTS.utils.text import TTSSentence\nfrom TTS.vocoder.utils.generic_utils import setup_environment\nfrom TTS.vocoder.utils.generic_utils import get_vocoder\nimport numpy as np\n\nclass TTS:\n    def __init__(self, model_name='tts_model_name'):\n        self.model_path = download_model(model_name)\n        self.default_sampling_rate = 22050\n        self.setup_model()\n\n    def setup_model(self):\n        self.tts = self.load_tts_model(self.model_path)\n        self.vocoder = get_vocoder('vocoder_model_name')\n\n    def load_tts_model(self, model_path):\n        # Load your TTS model here\n        pass\n\n    def text_to_speech(self, text):\n        # Convert text to speech using the TTS model\n        # This is a placeholder for the actual speech synthesis logic\n        audio = self.tts.synthesize(text)\n        return audio\n\n    def clone_voice(self, text, speaker_embeddings):\n        # Use speaker embeddings for voice cloning to synthesize speech\n        # This is a placeholder for the actual voice cloning logic\n        audio = self.tts.synthesize(text, speaker_embeddings=speaker_embeddings)\n        return audio\n\nif __name__ == '__main__':\n    # Example usage\n    tts_engine = TTS()\n    text = "Hello, this is a text-to-speech conversion."\n    audio_output = tts_engine.text_to_speech(text)\n\n    # Saving audio to a file\n    torchaudio.save('output.wav', audio_output, tts_engine.default_sampling_rate)
+"""TTS engine for EchoPilot — edge-tts primary, pyttsx3 offline fallback."""
+
+import asyncio
+import os
+import tempfile
+
+from pydub import AudioSegment
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
+TONES = ["Normal", "Upbeat", "Angry", "Excited"]
+
+# (speed_factor, volume_dB) for each tone preset
+_TONE_PARAMS = {
+    "Normal":  (1.00,  0),
+    "Upbeat":  (1.10, +2),
+    "Angry":   (0.95, +4),
+    "Excited": (1.15, +3),
+}
+
+
+class TTSEngine:
+    def __init__(self):
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # ── Public API ───────────────────────────────────────────────────────────
+
+    def generate(self, text: str, voice_short_name: str,
+                 tone: str = "Normal", mood: int = 5,
+                 output_path: str = None) -> str:
+        """
+        Synthesise *text* using *voice_short_name* (edge-tts voice ID).
+
+        Falls back to pyttsx3 when edge-tts is unavailable.
+
+        :param tone:  One of TONES; applies speed/volume post-processing.
+        :param mood:  1–10 scale; 5 is neutral (no extra effect).
+        :returns: Path to the generated WAV file.
+        """
+        if output_path is None:
+            fd, output_path = tempfile.mkstemp(suffix=".wav", dir=OUTPUT_DIR)
+            os.close(fd)
+
+        try:
+            self._generate_edge(text, voice_short_name, output_path)
+        except Exception as edge_err:
+            try:
+                self._generate_pyttsx3(text, output_path)
+            except Exception as tts_err:
+                raise RuntimeError(
+                    f"edge-tts failed ({edge_err}); offline fallback also failed ({tts_err})"
+                ) from tts_err
+
+        if tone != "Normal" or mood != 5:
+            self._apply_tone_mood(output_path, tone, mood)
+
+        return output_path
+
+    def trim_audio(self, audio_path: str, start_ms: int, end_ms: int) -> str:
+        """Trim *audio_path* to [start_ms, end_ms] in place."""
+        audio = AudioSegment.from_file(audio_path)
+        audio[int(start_ms):int(end_ms)].export(audio_path, format="wav")
+        return audio_path
+
+    def save_as(self, audio_path: str, output_path: str, fmt: str = "wav") -> str:
+        """
+        Export audio to *output_path*.
+
+        :param fmt: ``'wav'`` → 44100 Hz, 16-bit mono  |  ``'mp3'`` → 192 kbps
+        """
+        audio = AudioSegment.from_file(audio_path)
+        if fmt == "wav":
+            audio = audio.set_frame_rate(44100).set_sample_width(2).set_channels(1)
+            audio.export(output_path, format="wav")
+        else:
+            audio.export(output_path, format="mp3", bitrate="192k")
+        return output_path
+
+    def get_duration_ms(self, audio_path: str) -> int:
+        """Return duration of *audio_path* in milliseconds."""
+        return len(AudioSegment.from_file(audio_path))
+
+    # ── Backends ─────────────────────────────────────────────────────────────
+
+    def _generate_edge(self, text: str, voice: str, output_path: str):
+        """Synthesise with edge-tts and write a WAV to *output_path*."""
+        import edge_tts
+
+        tmp_mp3 = output_path + ".tmp.mp3"
+        asyncio.run(self._edge_communicate(text, voice, tmp_mp3))
+        audio = AudioSegment.from_file(tmp_mp3, format="mp3")
+        os.remove(tmp_mp3)
+        audio.export(output_path, format="wav")
+
+    @staticmethod
+    async def _edge_communicate(text: str, voice: str, path: str):
+        import edge_tts
+        await edge_tts.Communicate(text=text, voice=voice).save(path)
+
+    @staticmethod
+    def _generate_pyttsx3(text: str, output_path: str):
+        """Offline fallback using the system's pyttsx3 engine."""
+        import pyttsx3
+        engine = pyttsx3.init()
+        engine.save_to_file(text, output_path)
+        engine.runAndWait()
+
+    # ── Post-processing ──────────────────────────────────────────────────────
+
+    def _apply_tone_mood(self, audio_path: str, tone: str, mood: int):
+        """Apply tone preset scaled by mood (1–10, 5 = neutral) in place."""
+        speed, vol_db = _TONE_PARAMS.get(tone, _TONE_PARAMS["Normal"])
+
+        # Mood 5 → scale=1.0; mood 1 → scale=0.2; mood 10 → scale=2.0
+        scale = (mood - 5) / 5.0 + 1.0  # maps [1..10] → [0.2..2.0]
+
+        audio = AudioSegment.from_file(audio_path)
+
+        if abs(speed - 1.0) > 0.001:
+            adjusted = max(0.5, min(2.5, 1.0 + (speed - 1.0) * scale))
+            audio = self._change_speed(audio, adjusted)
+
+        if vol_db:
+            audio = audio + (vol_db * scale)
+
+        audio.export(audio_path, format="wav")
+
+    @staticmethod
+    def _change_speed(audio: AudioSegment, factor: float) -> AudioSegment:
+        """Resample to change playback speed (also shifts pitch slightly)."""
+        new_rate = int(audio.frame_rate * factor)
+        return audio._spawn(
+            audio.raw_data, overrides={"frame_rate": new_rate}
+        ).set_frame_rate(audio.frame_rate)

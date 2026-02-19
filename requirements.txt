@@ -1,13 +1,23 @@
+# Core GUI
 PyQt5
-TTS
-librosa
-pydub
-soundfile
+
+# TTS backends
+edge-tts          # primary: 400+ neural voices via Microsoft Edge TTS
+pyttsx3           # offline fallback using system TTS engine
+
+# Audio processing
+pydub             # manipulation, trim, speed, mp3/wav export
+librosa           # audio analysis (gender detection via pitch)
+soundfile         # WAV I/O
 numpy
 scipy
 
-# Additional dependencies for Windows
+# Language detection
+langdetect
+
+# Audio metadata
+mutagen
+
+# Build tools (Windows packaging)
 setuptools
 wheel
-pyaudio
-SoundFile
