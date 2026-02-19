@@ -1,8 +1,10 @@
-﻿name: Windows Build and Release
+name: Windows Build and Release
 
 on:
   push:
     branches: [ main, master ]
+  pull_request:
+    branches: [ '**' ]
   workflow_dispatch:
 
 jobs:
@@ -22,11 +24,12 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Install build tools
+      - name: Install dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install pyinstaller
+          python -m pip install -r requirements.txt
 
       - name: Prepare build folder
         shell: pwsh
@@ -58,20 +61,18 @@ jobs:
           path: |
             .\dist\xtts_local\**
             .\xtts_local_installer.exe
+            .\xtts_local_release.zip
 
       - name: Create GitHub Release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        id: create_release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
           name: Release ${{ github.run_number }}
           body: Automated build from commit ${{ github.sha }}
+          files: |
+            xtts_local_installer.exe
+            xtts_local_release.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Attach artifacts to Release
-        uses: actions/upload-release-asset@v1
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./xtts_local_installer.exe
-          asset_name: xtts_local_installer.exe
-          asset_content_type: application/octet-stream
