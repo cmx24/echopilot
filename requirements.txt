@@ -1,3 +1,13 @@
-﻿# Add runtime dependencies here, e.g.:
-# pyttsx3==2.90
-# numpy==1.26.0
+PyQt5
+TTS
+librosa
+pydub
+soundfile
+numpy
+scipy
+
+# Additional dependencies for Windows
+setuptools
+wheel
+pyaudio
+SoundFile
