@@ -1,4 +1,4 @@
-# build/build.ps1
+﻿# build/build.ps1
 param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -16,15 +16,22 @@ if (-not (Test-Path $src)) {
 # Clean previous builds
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -Path './build/pyinstaller','./build/__pycache__','./dist','./build','./xtts_local_installer.exe'
 
-# Run PyInstaller in onedir mode for reliability
-$addData = "ffmpeg;ffmpeg"
+# Prepare PyInstaller add-data only if ffmpeg exists
+$addData = $null
+if (Test-Path (Join-Path $root 'ffmpeg')) {
+    $addData = "ffmpeg;ffmpeg"
+}
+
+# Build args
 $pyinstallerArgs = @(
     "--noconfirm"
     "--onedir"
-    "--add-data", $addData
-    "--name", "xtts_local"
-    $src
 )
+if ($addData) {
+    $pyinstallerArgs += @("--add-data", $addData)
+}
+$pyinstallerArgs += @("--name", "xtts_local", $src)
+
 if (Test-Path $icon) {
     $pyinstallerArgs += @("--icon", $icon)
 }
