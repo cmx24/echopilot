@@ -754,6 +754,45 @@ class EchoPilot(QMainWindow):
         tl.addLayout(trim_btn_row)
         layout.addWidget(trim_grp)
 
+        # — Live Tweaks —
+        tweak_grp = QGroupBox("Live Tweaks (non-destructive until Apply)")
+        twl = QVBoxLayout(tweak_grp)
+
+        tweak_row1 = QHBoxLayout()
+        tweak_row1.addWidget(QLabel("Tone:"))
+        self.edit_tone_combo = QComboBox()
+        self.edit_tone_combo.addItems(TONES)
+        tweak_row1.addWidget(self.edit_tone_combo)
+        tweak_row1.addWidget(QLabel("Mood (1–10):"))
+        self.edit_mood_slider = QSlider(Qt.Horizontal)
+        self.edit_mood_slider.setRange(1, 10)
+        self.edit_mood_slider.setValue(5)
+        self.edit_mood_slider.setMaximumWidth(200)
+        self.edit_mood_slider.setTickPosition(QSlider.TicksBelow)
+        self.edit_mood_slider.setTickInterval(1)
+        tweak_row1.addWidget(self.edit_mood_slider)
+        self.edit_mood_val = QLabel("5")
+        self.edit_mood_val.setMinimumWidth(20)
+        self.edit_mood_slider.valueChanged.connect(
+            lambda v: self.edit_mood_val.setText(str(v))
+        )
+        tweak_row1.addWidget(self.edit_mood_val)
+        tweak_row1.addStretch()
+        twl.addLayout(tweak_row1)
+
+        tweak_row2 = QHBoxLayout()
+        self.preview_tweaks_btn = QPushButton("▶  Preview Tweaks")
+        self.preview_tweaks_btn.setEnabled(False)
+        self.preview_tweaks_btn.clicked.connect(self._preview_tweaks)
+        tweak_row2.addWidget(self.preview_tweaks_btn)
+        self.apply_tweaks_btn = QPushButton("✔  Apply Tweaks")
+        self.apply_tweaks_btn.setEnabled(False)
+        self.apply_tweaks_btn.clicked.connect(self._apply_tweaks)
+        tweak_row2.addWidget(self.apply_tweaks_btn)
+        tweak_row2.addStretch()
+        twl.addLayout(tweak_row2)
+        layout.addWidget(tweak_grp)
+
         # — Export —
         export_grp = QGroupBox("Export Audio")
         el = QHBoxLayout(export_grp)
@@ -800,8 +839,41 @@ class EchoPilot(QMainWindow):
         self.edit_end_lbl.setText(f"{dur} ms")
         self.play_orig_btn.setEnabled(True)
         self.trim_btn.setEnabled(True)
+        self.preview_tweaks_btn.setEnabled(True)
+        self.apply_tweaks_btn.setEnabled(True)
         self.export_btn.setEnabled(True)
         self.edit_status.setText("")
+
+    def _preview_tweaks(self):
+        """Apply tone/mood to a temporary copy and play it (non-destructive)."""
+        if not self._edit_audio or not os.path.isfile(self._edit_audio):
+            return
+        tmp = self._copy_edit_to_temp()
+        tone = self.edit_tone_combo.currentText()
+        mood = self.edit_mood_slider.value()
+        self.engine.apply_tone_mood(tmp, tone, mood)
+        self.edit_status.setText(f"▶ Previewing: {tone}, mood {mood}")
+        self._play_file(tmp)
+
+    def _apply_tweaks(self):
+        """Apply tone/mood to a new working copy, making it the current audio."""
+        if not self._edit_audio or not os.path.isfile(self._edit_audio):
+            return
+        tmp = self._copy_edit_to_temp()
+        tone = self.edit_tone_combo.currentText()
+        mood = self.edit_mood_slider.value()
+        self.engine.apply_tone_mood(tmp, tone, mood)
+        self._edit_audio = tmp
+        dur = self.engine.get_duration_ms(tmp)
+        self.edit_dur_label.setText(f"Duration: {dur / 1000:.2f} s  ({dur} ms)")
+        self.edit_status.setText(f"✔ Applied: {tone}, mood {mood}")
+
+    def _copy_edit_to_temp(self) -> str:
+        """Copy the current edit audio to a new temp WAV and return its path."""
+        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=os.path.join(BASE_DIR, "output"))
+        os.close(fd)
+        shutil.copy2(self._edit_audio, tmp)
+        return tmp
 
     def _on_trim_slider_changed(self):
         start = self.edit_start_slider.value()

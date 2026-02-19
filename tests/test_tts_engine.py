@@ -143,6 +143,35 @@ class TestTTSEngineAudioOps(unittest.TestCase):
         new_dur = self.engine.get_duration_ms(path)
         self.assertLess(new_dur, original_dur)
 
+    # ── apply_tone_mood (public wrapper) ──────────────────────────────────────
+
+    def test_apply_tone_mood_public_normal_mood5_is_noop(self):
+        """Public apply_tone_mood with Normal/5 must not modify the file."""
+        path = self._wav("pub_noop.wav", 1000)
+        original_dur = self.engine.get_duration_ms(path)
+        result = self.engine.apply_tone_mood(path, "Normal", 5)
+        self.assertEqual(result, path)
+        self.assertAlmostEqual(self.engine.get_duration_ms(path), original_dur, delta=50)
+
+    def test_apply_tone_mood_public_returns_path(self):
+        path = self._wav("pub_ret.wav", 1000)
+        result = self.engine.apply_tone_mood(path, "Normal", 5)
+        self.assertEqual(result, path)
+
+    def test_apply_tone_mood_public_upbeat_shortens(self):
+        """Public wrapper must delegate to _apply_tone_mood for non-Normal tone."""
+        path = self._wav("pub_upbeat.wav", 2000)
+        original_dur = self.engine.get_duration_ms(path)
+        self.engine.apply_tone_mood(path, "Upbeat", 5)
+        self.assertLess(self.engine.get_duration_ms(path), original_dur)
+
+    def test_apply_tone_mood_public_mood_shift_triggers_processing(self):
+        """Mood != 5 with Normal tone must still trigger processing (vol change)."""
+        path = self._wav("pub_mood.wav", 1000)
+        # Should not raise; file is modified in place
+        self.engine.apply_tone_mood(path, "Normal", 8)
+        self.assertTrue(os.path.isfile(path))
+
     # ── generate (mocked backends) ────────────────────────────────────────────
 
     def test_generate_returns_wav_path(self):

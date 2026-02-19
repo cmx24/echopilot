@@ -81,6 +81,20 @@ class TTSEngine:
         """Return duration of *audio_path* in milliseconds."""
         return len(AudioSegment.from_file(audio_path))
 
+    def apply_tone_mood(self, audio_path: str, tone: str, mood: int) -> str:
+        """
+        Apply *tone* preset and *mood* (1–10) to *audio_path* in place.
+
+        Identical to the post-processing step in :meth:`generate`.
+        This public method allows external callers (e.g. the Edit tab) to
+        apply tweaks to an already-synthesised file without re-generating.
+
+        :returns: *audio_path* (unchanged path, file is modified in place).
+        """
+        if tone != "Normal" or mood != 5:
+            self._apply_tone_mood(audio_path, tone, mood)
+        return audio_path
+
     # ── Backends ─────────────────────────────────────────────────────────────
 
     def _generate_edge(self, text: str, voice: str, output_path: str):
