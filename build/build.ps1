@@ -1,4 +1,4 @@
-﻿# build/build.ps1
+# build/build.ps1
 param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -14,7 +14,7 @@ if (-not (Test-Path $src)) {
 }
 
 # Clean previous builds
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue .\build\pyinstaller .\build\__pycache__ .\dist .\build .\xtts_local_installer.exe
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -Path './build/pyinstaller','./build/__pycache__','./dist','./build','./xtts_local_installer.exe'
 
 # Run PyInstaller in onedir mode for reliability
 $addData = "ffmpeg;ffmpeg"
