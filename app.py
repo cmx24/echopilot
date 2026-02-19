@@ -1,68 +1,859 @@
-import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel, QPushButton, QSlider
+"""EchoPilot — Text-to-Speech Studio (PyQt5 GUI)."""
 
-class TTSApp(QMainWindow):
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import tempfile
+
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QComboBox,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSlider,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+    QTabWidget,
+)
+
+from tts_engine import TTSEngine, TONES
+from voice_manager import VoiceManager
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# ── Worker threads ────────────────────────────────────────────────────────────
+
+class TTSWorker(QThread):
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, engine: TTSEngine, params: dict):
+        super().__init__()
+        self.engine = engine
+        self.params = params
+
+    def run(self):
+        try:
+            self.finished.emit(self.engine.generate(**self.params))
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class AnalyzeWorker(QThread):
+    result = pyqtSignal(str)   # detected gender
+    error = pyqtSignal(str)
+
+    def __init__(self, vm: VoiceManager, audio_path: str):
+        super().__init__()
+        self.vm = vm
+        self.audio_path = audio_path
+
+    def run(self):
+        try:
+            self.result.emit(self.vm.detect_gender_from_audio(self.audio_path))
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+# ── Main window ───────────────────────────────────────────────────────────────
+
+class EchoPilot(QMainWindow):
+    _STYLE = """
+        QMainWindow, QWidget { background-color: #1e1e2e; color: #cdd6f4; font-size: 13px; }
+        QTabWidget::pane { border: none; background: #1e1e2e; }
+        QTabBar::tab {
+            background: #313244; color: #cdd6f4; padding: 8px 18px;
+            border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 2px;
+            font-weight: bold;
+        }
+        QTabBar::tab:selected { background: #45475a; color: #89b4fa; }
+        QGroupBox {
+            border: 1px solid #45475a; border-radius: 6px; margin-top: 10px;
+            padding: 6px; font-weight: bold; color: #89b4fa;
+        }
+        QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
+        QPushButton {
+            background-color: #89b4fa; color: #1e1e2e; border: none;
+            border-radius: 5px; padding: 6px 16px; font-weight: bold;
+        }
+        QPushButton:hover { background-color: #b4befe; }
+        QPushButton:disabled { background-color: #45475a; color: #6c7086; }
+        QTextEdit, QLineEdit {
+            background: #313244; color: #cdd6f4;
+            border: 1px solid #45475a; border-radius: 4px; padding: 4px;
+        }
+        QComboBox {
+            background: #313244; color: #cdd6f4;
+            border: 1px solid #45475a; border-radius: 4px; padding: 4px; min-width: 120px;
+        }
+        QComboBox QAbstractItemView { background: #313244; color: #cdd6f4; }
+        QSlider::groove:horizontal {
+            height: 6px; background: #45475a; border-radius: 3px;
+        }
+        QSlider::handle:horizontal {
+            width: 16px; height: 16px; background: #89b4fa;
+            border-radius: 8px; margin: -5px 0;
+        }
+        QSlider::sub-page:horizontal { background: #89b4fa; border-radius: 3px; }
+        QTableWidget {
+            background: #313244; color: #cdd6f4;
+            gridline-color: #45475a; border: none; alternate-background-color: #2a2a3e;
+        }
+        QHeaderView::section {
+            background-color: #45475a; color: #89b4fa;
+            padding: 6px; border: none; font-weight: bold;
+        }
+    """
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Text-to-Speech Application")
-        self.setGeometry(100, 100, 800, 600)
+        self.setWindowTitle("EchoPilot — TTS Studio")
+        self.setMinimumSize(920, 680)
+        self.vm = VoiceManager()
+        self.engine = TTSEngine()
+        self._current_audio: str = None
+        self._edit_audio: str = None
+        self._tts_worker: TTSWorker = None
+        self._analyze_worker: AnalyzeWorker = None
+        self._play_proc: subprocess.Popen = None
 
-        self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
+        tabs = QTabWidget()
+        self.setCentralWidget(tabs)
+        tabs.addTab(self._build_generate_tab(),  "🎙  Generate")
+        tabs.addTab(self._build_clone_tab(),      "🧬  Clone Voice")
+        tabs.addTab(self._build_bank_tab(),       "📂  Voice Bank")
+        tabs.addTab(self._build_edit_tab(),       "✂   Edit & Save")
+        self.setStyleSheet(self._STYLE)
 
-        self.init_ui()
+    # ── helpers ───────────────────────────────────────────────────────────────
 
-    def init_ui(self):
-        self.tabs.addTab(self.create_tts_tab(), "Text-to-Speech")
-        self.tabs.addTab(self.create_voice_cloning_tab(), "Voice Cloning")
-        self.tabs.addTab(self.create_voice_management_tab(), "Voice Management")
-        self.tabs.addTab(self.create_playback_tab(), "Playback")
-        self.tabs.addTab(self.create_live_tweaking_tab(), "Live Tweaking")
+    def _play_file(self, path: str):
+        """Play an audio file using the best available system player."""
+        self._stop_playback()
+        system = platform.system()
+        try:
+            if system == "Linux":
+                for player in ("ffplay", "aplay", "paplay", "mpv", "mplayer"):
+                    if shutil.which(player):
+                        args = [player]
+                        if player == "ffplay":
+                            args += ["-nodisp", "-autoexit", "-loglevel", "quiet"]
+                        self._play_proc = subprocess.Popen(
+                            args + [path],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        return
+                QMessageBox.warning(
+                    self, "Playback Error",
+                    "No audio player found. Install ffplay, aplay, or mpv.",
+                )
+            elif system == "Darwin":
+                self._play_proc = subprocess.Popen(["afplay", path])
+            else:
+                try:
+                    os.startfile(path)
+                except OSError as exc:
+                    QMessageBox.warning(self, "Playback Error", str(exc))
+        except Exception as exc:
+            QMessageBox.warning(self, "Playback Error", str(exc))
 
-    def create_tts_tab(self):
+    def _stop_playback(self):
+        if self._play_proc and self._play_proc.poll() is None:
+            self._play_proc.terminate()
+        self._play_proc = None
+
+    @staticmethod
+    def _hbox(*widgets) -> QHBoxLayout:
+        row = QHBoxLayout()
+        for w in widgets:
+            if w is None:
+                row.addStretch()
+            else:
+                row.addWidget(w)
+        return row
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Tab 1 — Generate
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _build_generate_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Text-to-Speech Functionality Here"))
-        layout.addWidget(QPushButton("Convert Text to Speech"))
-        tab.setLayout(layout)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        # — Text input —
+        text_grp = QGroupBox("Text to Speak")
+        tl = QVBoxLayout(text_grp)
+        self.gen_text = QTextEdit()
+        self.gen_text.setPlaceholderText("Type or paste the text you want to synthesise…")
+        self.gen_text.setMinimumHeight(100)
+        tl.addWidget(self.gen_text)
+        layout.addWidget(text_grp)
+
+        # — Voice & settings —
+        vc_grp = QGroupBox("Voice & Settings")
+        vl = QVBoxLayout(vc_grp)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Voice:"))
+        self.gen_voice_combo = QComboBox()
+        self.gen_voice_combo.setMinimumWidth(210)
+        row1.addWidget(self.gen_voice_combo)
+        row1.addWidget(QLabel("Language:"))
+        self.gen_lang_combo = QComboBox()
+        row1.addWidget(self.gen_lang_combo)
+        row1.addWidget(QLabel("Gender:"))
+        self.gen_gender_combo = QComboBox()
+        row1.addWidget(self.gen_gender_combo)
+        row1.addStretch()
+        vl.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Tone:"))
+        self.gen_tone_combo = QComboBox()
+        self.gen_tone_combo.addItems(TONES)
+        row2.addWidget(self.gen_tone_combo)
+        row2.addWidget(QLabel("Mood (1–10):"))
+        self.gen_mood_slider = QSlider(Qt.Horizontal)
+        self.gen_mood_slider.setRange(1, 10)
+        self.gen_mood_slider.setValue(5)
+        self.gen_mood_slider.setMaximumWidth(200)
+        self.gen_mood_slider.setTickPosition(QSlider.TicksBelow)
+        self.gen_mood_slider.setTickInterval(1)
+        row2.addWidget(self.gen_mood_slider)
+        self.gen_mood_val = QLabel("5")
+        self.gen_mood_val.setMinimumWidth(20)
+        self.gen_mood_slider.valueChanged.connect(lambda v: self.gen_mood_val.setText(str(v)))
+        row2.addWidget(self.gen_mood_val)
+        row2.addStretch()
+        vl.addLayout(row2)
+        layout.addWidget(vc_grp)
+
+        # — Generate button —
+        row3 = QHBoxLayout()
+        self.gen_btn = QPushButton("▶  Generate Speech")
+        self.gen_btn.setMinimumHeight(36)
+        self.gen_btn.clicked.connect(self._on_generate)
+        row3.addWidget(self.gen_btn)
+        self.gen_status = QLabel("")
+        row3.addWidget(self.gen_status)
+        row3.addStretch()
+        layout.addLayout(row3)
+
+        # — Playback / export —
+        pb_grp = QGroupBox("Playback & Export")
+        pl = QHBoxLayout(pb_grp)
+        self.gen_play_btn = QPushButton("▶  Play")
+        self.gen_play_btn.setEnabled(False)
+        self.gen_play_btn.clicked.connect(lambda: self._play_file(self._current_audio))
+        pl.addWidget(self.gen_play_btn)
+        self.gen_stop_btn = QPushButton("■  Stop")
+        self.gen_stop_btn.setEnabled(False)
+        self.gen_stop_btn.clicked.connect(self._stop_playback)
+        pl.addWidget(self.gen_stop_btn)
+        self.gen_save_btn = QPushButton("💾  Save Audio…")
+        self.gen_save_btn.setEnabled(False)
+        self.gen_save_btn.clicked.connect(self._save_current_audio)
+        pl.addWidget(self.gen_save_btn)
+        self.gen_audio_info = QLabel("No audio generated yet.")
+        pl.addWidget(self.gen_audio_info)
+        pl.addStretch()
+        layout.addWidget(pb_grp)
+
+        layout.addStretch()
+
+        # populate filters
+        self._refresh_gen_filters()
+        self.gen_lang_combo.currentTextChanged.connect(self._populate_gen_voice_combo)
+        self.gen_gender_combo.currentTextChanged.connect(self._populate_gen_voice_combo)
         return tab
 
-    def create_voice_cloning_tab(self):
+    def _refresh_gen_filters(self):
+        for combo, getter in (
+            (self.gen_lang_combo,    self.vm.get_all_languages),
+            (self.gen_gender_combo,  self.vm.get_all_genders),
+        ):
+            cur = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(getter())
+            idx = combo.findText(cur)
+            combo.setCurrentIndex(max(0, idx))
+            combo.blockSignals(False)
+        self._populate_gen_voice_combo()
+
+    def _populate_gen_voice_combo(self):
+        lang   = self.gen_lang_combo.currentText()
+        gender = self.gen_gender_combo.currentText()
+        voices = self.vm.get_all_voices(
+            gender=None if gender == "All" else gender,
+            language=None if lang == "All" else lang,
+        )
+        self.gen_voice_combo.blockSignals(True)
+        self.gen_voice_combo.clear()
+        for v in voices:
+            tag = "🔵" if v["type"] == "builtin" else "🟢"
+            self.gen_voice_combo.addItem(f"{tag} {v['name']}", v)
+        self.gen_voice_combo.blockSignals(False)
+
+    def _on_generate(self):
+        text = self.gen_text.toPlainText().strip()
+        if not text:
+            QMessageBox.warning(self, "Empty Text", "Please enter some text to synthesise.")
+            return
+        voice_data = self.gen_voice_combo.currentData()
+        if voice_data is None:
+            QMessageBox.warning(self, "No Voice", "Please select a voice.")
+            return
+
+        if voice_data.get("type") == "custom":
+            ref = voice_data.get("reference_audio", "")
+            if not ref or not os.path.isfile(ref):
+                QMessageBox.information(
+                    self, "Custom Voice — No Reference Audio",
+                    "This custom voice profile has no reference audio file.\n\n"
+                    "Neural voice cloning (XTTS v2 / OpenVoice) requires a reference\n"
+                    "audio file to be set when saving the profile.\n\n"
+                    "Falling back to the default built-in voice for now.",
+                )
+            short_name = "en-US-AriaNeural"
+        else:
+            short_name = voice_data.get("short_name", "en-US-AriaNeural")
+
+        self.gen_btn.setEnabled(False)
+        self.gen_play_btn.setEnabled(False)
+        self.gen_save_btn.setEnabled(False)
+        self.gen_status.setText("⏳ Generating…")
+
+        self._tts_worker = TTSWorker(self.engine, {
+            "text": text,
+            "voice_short_name": short_name,
+            "tone": self.gen_tone_combo.currentText(),
+            "mood": self.gen_mood_slider.value(),
+        })
+        self._tts_worker.finished.connect(self._on_generate_done)
+        self._tts_worker.error.connect(self._on_generate_error)
+        self._tts_worker.start()
+
+    def _on_generate_done(self, path: str):
+        self._current_audio = path
+        dur = self.engine.get_duration_ms(path) / 1000.0
+        self.gen_audio_info.setText(f"✔ {os.path.basename(path)}  ({dur:.1f} s)")
+        self.gen_status.setText("✔ Done")
+        self.gen_btn.setEnabled(True)
+        self.gen_play_btn.setEnabled(True)
+        self.gen_stop_btn.setEnabled(True)
+        self.gen_save_btn.setEnabled(True)
+
+    def _on_generate_error(self, msg: str):
+        self.gen_status.setText("✘ Error")
+        self.gen_btn.setEnabled(True)
+        QMessageBox.critical(self, "Generation Error", msg)
+
+    def _save_current_audio(self):
+        if not self._current_audio or not os.path.isfile(self._current_audio):
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Audio", "speech.wav",
+            "WAV files (*.wav);;MP3 files (*.mp3);;All Files (*)",
+        )
+        if not path:
+            return
+        fmt = "mp3" if path.lower().endswith(".mp3") else "wav"
+        self.engine.save_as(self._current_audio, path, fmt)
+        QMessageBox.information(self, "Saved", f"Saved to:\n{path}")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Tab 2 — Clone Voice
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _build_clone_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Voice Cloning Functionality Here"))
-        layout.addWidget(QPushButton("Clone Voice"))
-        tab.setLayout(layout)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        # — Reference audio —
+        ref_grp = QGroupBox("Reference Audio  (mp3 / wav)")
+        rl = QVBoxLayout(ref_grp)
+        row = QHBoxLayout()
+        self.clone_file_edit = QLineEdit()
+        self.clone_file_edit.setReadOnly(True)
+        self.clone_file_edit.setPlaceholderText("Select a speaker reference audio file…")
+        row.addWidget(self.clone_file_edit)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse_reference)
+        row.addWidget(browse_btn)
+        rl.addLayout(row)
+
+        detect_row = QHBoxLayout()
+        self.clone_detect_btn = QPushButton("🔍  Auto-Detect Gender")
+        self.clone_detect_btn.setEnabled(False)
+        self.clone_detect_btn.clicked.connect(self._detect_gender)
+        detect_row.addWidget(self.clone_detect_btn)
+        self.clone_gender_detected = QLabel("Detected gender: —")
+        detect_row.addWidget(self.clone_gender_detected)
+        preview_ref_btn = QPushButton("▶  Preview Reference")
+        preview_ref_btn.clicked.connect(
+            lambda: self._play_file(self.clone_file_edit.text())
+            if os.path.isfile(self.clone_file_edit.text()) else None
+        )
+        detect_row.addWidget(preview_ref_btn)
+        detect_row.addStretch()
+        rl.addLayout(detect_row)
+        layout.addWidget(ref_grp)
+
+        # — Profile metadata —
+        meta_grp = QGroupBox("Voice Profile Details")
+        ml = QVBoxLayout(meta_grp)
+
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Voice Name:"))
+        self.clone_name_edit = QLineEdit()
+        self.clone_name_edit.setPlaceholderText("e.g.  My Custom Voice")
+        name_row.addWidget(self.clone_name_edit)
+        ml.addLayout(name_row)
+
+        meta_row = QHBoxLayout()
+        meta_row.addWidget(QLabel("Gender:"))
+        self.clone_gender_combo = QComboBox()
+        self.clone_gender_combo.addItems(["Female", "Male", "Unknown"])
+        meta_row.addWidget(self.clone_gender_combo)
+        meta_row.addWidget(QLabel("Language:"))
+        self.clone_lang_combo = QComboBox()
+        self.clone_lang_combo.addItems(
+            [l for l in self.vm.get_all_languages() if l != "All"]
+        )
+        meta_row.addWidget(self.clone_lang_combo)
+        meta_row.addStretch()
+        ml.addLayout(meta_row)
+
+        notes_row = QHBoxLayout()
+        notes_row.addWidget(QLabel("Notes:"))
+        self.clone_notes_edit = QLineEdit()
+        self.clone_notes_edit.setPlaceholderText("Optional description")
+        notes_row.addWidget(self.clone_notes_edit)
+        ml.addLayout(notes_row)
+        layout.addWidget(meta_grp)
+
+        # — Language auto-detect from sample text —
+        lang_row = QHBoxLayout()
+        self.clone_lang_text_edit = QLineEdit()
+        self.clone_lang_text_edit.setPlaceholderText(
+            "Paste a short sample text to auto-detect its language…"
+        )
+        lang_row.addWidget(self.clone_lang_text_edit)
+        detect_lang_btn = QPushButton("🌐  Detect Language")
+        detect_lang_btn.clicked.connect(self._detect_language_from_text)
+        lang_row.addWidget(detect_lang_btn)
+        layout.addLayout(lang_row)
+
+        # — Save —
+        save_row = QHBoxLayout()
+        save_btn = QPushButton("💾  Save Voice Profile")
+        save_btn.setMinimumHeight(36)
+        save_btn.clicked.connect(self._save_clone_profile)
+        save_row.addWidget(save_btn)
+        self.clone_status = QLabel("")
+        save_row.addWidget(self.clone_status)
+        save_row.addStretch()
+        layout.addLayout(save_row)
+
+        layout.addStretch()
         return tab
 
-    def create_voice_management_tab(self):
+    def _browse_reference(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Reference Audio", "",
+            "Audio Files (*.mp3 *.wav *.ogg *.flac);;All Files (*)",
+        )
+        if path:
+            self.clone_file_edit.setText(path)
+            self.clone_detect_btn.setEnabled(True)
+            self.clone_status.setText("")
+
+    def _detect_gender(self):
+        path = self.clone_file_edit.text()
+        if not path or not os.path.isfile(path):
+            return
+        self.clone_detect_btn.setEnabled(False)
+        self.clone_gender_detected.setText("Detecting…")
+        self._analyze_worker = AnalyzeWorker(self.vm, path)
+        self._analyze_worker.result.connect(self._on_gender_detected)
+        self._analyze_worker.error.connect(
+            lambda e: self.clone_gender_detected.setText(f"Error: {e}")
+        )
+        self._analyze_worker.start()
+
+    def _on_gender_detected(self, gender: str):
+        self.clone_gender_detected.setText(f"Detected gender: {gender}")
+        idx = self.clone_gender_combo.findText(gender)
+        if idx >= 0:
+            self.clone_gender_combo.setCurrentIndex(idx)
+        self.clone_detect_btn.setEnabled(True)
+
+    def _detect_language_from_text(self):
+        text = self.clone_lang_text_edit.text().strip()
+        if not text:
+            return
+        lang = self.vm.detect_language_from_text(text)
+        idx = self.clone_lang_combo.findText(lang)
+        if idx >= 0:
+            self.clone_lang_combo.setCurrentIndex(idx)
+        self.clone_status.setText(f"Detected language: {lang}")
+
+    def _save_clone_profile(self):
+        name = self.clone_name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Missing Name", "Please enter a voice name.")
+            return
+        gender   = self.clone_gender_combo.currentText()
+        language = self.clone_lang_combo.currentText()
+        notes    = self.clone_notes_edit.text()
+        ref_src  = self.clone_file_edit.text()
+
+        # Copy reference audio into profiles/
+        ref_dest = ""
+        if ref_src and os.path.isfile(ref_src):
+            profiles_dir = os.path.join(BASE_DIR, "profiles")
+            os.makedirs(profiles_dir, exist_ok=True)
+            ext = os.path.splitext(ref_src)[1]
+            safe = name.replace(" ", "_")
+            ref_dest = os.path.join(profiles_dir, f"{safe}_ref{ext}")
+            if os.path.abspath(ref_src) != os.path.abspath(ref_dest):
+                shutil.copy2(ref_src, ref_dest)
+
+        try:
+            self.vm.save_custom_voice(name, gender, language, ref_dest, notes)
+            self.clone_status.setText(f"✔ Voice '{name}' saved.")
+            self._refresh_gen_filters()
+            self._refresh_bank_table()
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Error", str(exc))
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Tab 3 — Voice Bank
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _build_bank_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Voice Management Functionality Here"))
-        layout.addWidget(QPushButton("Manage Voices"))
-        tab.setLayout(layout)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        # — Filters —
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Gender:"))
+        self.bank_gender_filter = QComboBox()
+        self.bank_gender_filter.addItems(["All", "Female", "Male", "Unknown"])
+        self.bank_gender_filter.currentTextChanged.connect(self._refresh_bank_table)
+        filter_row.addWidget(self.bank_gender_filter)
+        filter_row.addWidget(QLabel("Language:"))
+        self.bank_lang_filter = QComboBox()
+        self.bank_lang_filter.addItems(self.vm.get_all_languages())
+        self.bank_lang_filter.currentTextChanged.connect(self._refresh_bank_table)
+        filter_row.addWidget(self.bank_lang_filter)
+        filter_row.addWidget(QLabel("Type:"))
+        self.bank_type_filter = QComboBox()
+        self.bank_type_filter.addItems(["All", "Builtin", "Custom"])
+        self.bank_type_filter.currentTextChanged.connect(self._refresh_bank_table)
+        filter_row.addWidget(self.bank_type_filter)
+        clear_btn = QPushButton("✕  Clear")
+        clear_btn.clicked.connect(self._clear_bank_filters)
+        filter_row.addWidget(clear_btn)
+        filter_row.addStretch()
+        layout.addLayout(filter_row)
+
+        # — Table —
+        self.bank_table = QTableWidget()
+        self.bank_table.setColumnCount(5)
+        self.bank_table.setHorizontalHeaderLabels(["Name", "Gender", "Language", "Type", "Notes"])
+        self.bank_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.bank_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.bank_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.bank_table.setAlternatingRowColors(True)
+        layout.addWidget(self.bank_table)
+
+        # — Actions —
+        btn_row = QHBoxLayout()
+        preview_btn = QPushButton("▶  Preview Voice")
+        preview_btn.clicked.connect(self._bank_preview)
+        btn_row.addWidget(preview_btn)
+        load_btn = QPushButton("📥  Load in Generate")
+        load_btn.clicked.connect(self._bank_load_in_generate)
+        btn_row.addWidget(load_btn)
+        del_btn = QPushButton("🗑  Delete Custom Voice")
+        del_btn.clicked.connect(self._bank_delete)
+        btn_row.addWidget(del_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self._refresh_bank_table()
         return tab
 
-    def create_playback_tab(self):
+    def _clear_bank_filters(self):
+        for combo in (self.bank_gender_filter, self.bank_lang_filter, self.bank_type_filter):
+            combo.setCurrentIndex(0)
+
+    def _refresh_bank_table(self):
+        gender = self.bank_gender_filter.currentText()
+        lang   = self.bank_lang_filter.currentText()
+        vtype  = self.bank_type_filter.currentText()
+
+        voices = self.vm.get_all_voices(
+            gender=None if gender == "All" else gender,
+            language=None if lang == "All" else lang,
+        )
+        if vtype != "All":
+            voices = [v for v in voices if v.get("type", "builtin").lower() == vtype.lower()]
+
+        self.bank_table.setRowCount(len(voices))
+        for row, v in enumerate(voices):
+            for col, key in enumerate(("name", "gender", "language", "type", "notes")):
+                item = QTableWidgetItem(v.get(key, ""))
+                self.bank_table.setItem(row, col, item)
+            self.bank_table.item(row, 0).setData(Qt.UserRole, v)
+
+    def _selected_bank_voice(self):
+        row = self.bank_table.currentRow()
+        if row < 0:
+            return None
+        item = self.bank_table.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def _bank_preview(self):
+        voice = self._selected_bank_voice()
+        if not voice:
+            QMessageBox.information(self, "No Selection", "Select a voice to preview.")
+            return
+        if voice.get("type") == "custom":
+            ref = voice.get("reference_audio", "")
+            if ref and os.path.isfile(ref):
+                self._play_file(ref)
+                return
+        short_name = voice.get("short_name", "en-US-AriaNeural")
+        self._tts_worker = TTSWorker(self.engine, {
+            "text": "Hello, this is a voice preview.",
+            "voice_short_name": short_name,
+            "tone": "Normal",
+            "mood": 5,
+        })
+        self._tts_worker.finished.connect(self._play_file)
+        self._tts_worker.error.connect(lambda e: QMessageBox.warning(self, "Preview Error", e))
+        self._tts_worker.start()
+
+    def _bank_load_in_generate(self):
+        voice = self._selected_bank_voice()
+        if not voice:
+            return
+        # Switch to Generate tab
+        self.centralWidget().setCurrentIndex(0)
+        lang = voice.get("language", "All")
+        idx = self.gen_lang_combo.findText(lang)
+        if idx >= 0:
+            self.gen_lang_combo.setCurrentIndex(idx)
+        self._populate_gen_voice_combo()
+        name = voice.get("name", "")
+        for i in range(self.gen_voice_combo.count()):
+            v = self.gen_voice_combo.itemData(i)
+            if v and v.get("name") == name:
+                self.gen_voice_combo.setCurrentIndex(i)
+                break
+
+    def _bank_delete(self):
+        voice = self._selected_bank_voice()
+        if not voice:
+            QMessageBox.information(self, "No Selection", "Select a custom voice to delete.")
+            return
+        if voice.get("type", "builtin") == "builtin":
+            QMessageBox.warning(self, "Cannot Delete", "Built-in voices cannot be deleted.")
+            return
+        if QMessageBox.question(
+            self, "Delete Voice",
+            f"Delete voice '{voice['name']}'?",
+            QMessageBox.Yes | QMessageBox.No,
+        ) == QMessageBox.Yes:
+            self.vm.delete_custom_voice(voice["name"])
+            self._refresh_bank_table()
+            self._refresh_gen_filters()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Tab 4 — Edit & Save
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _build_edit_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Playback Functionality Here"))
-        layout.addWidget(QPushButton("Play Audio"))
-        tab.setLayout(layout)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        # — Load —
+        load_grp = QGroupBox("Load Audio")
+        ll = QHBoxLayout(load_grp)
+        self.edit_file_edit = QLineEdit()
+        self.edit_file_edit.setReadOnly(True)
+        self.edit_file_edit.setPlaceholderText("Load an audio file to trim and export…")
+        ll.addWidget(self.edit_file_edit)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse_edit_audio)
+        ll.addWidget(browse_btn)
+        use_gen_btn = QPushButton("Use Generated Audio")
+        use_gen_btn.clicked.connect(self._load_generated_audio)
+        ll.addWidget(use_gen_btn)
+        layout.addWidget(load_grp)
+
+        self.edit_dur_label = QLabel("Duration: —")
+        layout.addWidget(self.edit_dur_label)
+
+        # — Trim —
+        trim_grp = QGroupBox("Trim")
+        tl = QVBoxLayout(trim_grp)
+        for attr, label in (("start", "Start (ms):"), ("end", "End (ms):  ")):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 60000)
+            slider.setValue(0 if attr == "start" else 60000)
+            slider.valueChanged.connect(self._on_trim_slider_changed)
+            setattr(self, f"edit_{attr}_slider", slider)
+            row.addWidget(slider)
+            lbl = QLabel(f"{'0' if attr == 'start' else '60000'} ms")
+            lbl.setMinimumWidth(80)
+            setattr(self, f"edit_{attr}_lbl", lbl)
+            row.addWidget(lbl)
+            tl.addLayout(row)
+
+        trim_btn_row = QHBoxLayout()
+        self.play_orig_btn = QPushButton("▶  Play Original")
+        self.play_orig_btn.setEnabled(False)
+        self.play_orig_btn.clicked.connect(lambda: self._play_file(self._edit_audio))
+        trim_btn_row.addWidget(self.play_orig_btn)
+        self.trim_btn = QPushButton("✂  Apply Trim & Preview")
+        self.trim_btn.setEnabled(False)
+        self.trim_btn.clicked.connect(self._apply_trim)
+        trim_btn_row.addWidget(self.trim_btn)
+        trim_btn_row.addStretch()
+        tl.addLayout(trim_btn_row)
+        layout.addWidget(trim_grp)
+
+        # — Export —
+        export_grp = QGroupBox("Export Audio")
+        el = QHBoxLayout(export_grp)
+        el.addWidget(QLabel("Format:"))
+        self.edit_fmt_combo = QComboBox()
+        self.edit_fmt_combo.addItems(["WAV  (44100 Hz, 16-bit)", "MP3  (192 kbps)"])
+        el.addWidget(self.edit_fmt_combo)
+        self.export_btn = QPushButton("💾  Export…")
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self._export_audio)
+        el.addWidget(self.export_btn)
+        self.edit_status = QLabel("")
+        el.addWidget(self.edit_status)
+        el.addStretch()
+        layout.addWidget(export_grp)
+
+        layout.addStretch()
         return tab
 
-    def create_live_tweaking_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Live Tweaking Controls Here"))
-        slider = QSlider()
-        slider.setRange(0, 10)
-        layout.addWidget(slider)
-        tab.setLayout(layout)
-        return tab
+    def _browse_edit_audio(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Audio", "",
+            "Audio Files (*.mp3 *.wav *.ogg *.flac);;All Files (*)",
+        )
+        if path:
+            self._load_audio_for_edit(path)
 
-if __name__ == "__main__":
+    def _load_generated_audio(self):
+        if self._current_audio and os.path.isfile(self._current_audio):
+            self._load_audio_for_edit(self._current_audio)
+        else:
+            QMessageBox.information(self, "No Audio", "Generate audio first in the Generate tab.")
+
+    def _load_audio_for_edit(self, path: str):
+        self._edit_audio = path
+        self.edit_file_edit.setText(path)
+        dur = self.engine.get_duration_ms(path)
+        self.edit_dur_label.setText(f"Duration: {dur / 1000:.2f} s  ({dur} ms)")
+        for slider in (self.edit_start_slider, self.edit_end_slider):
+            slider.setRange(0, dur)
+        self.edit_start_slider.setValue(0)
+        self.edit_end_slider.setValue(dur)
+        self.edit_start_lbl.setText("0 ms")
+        self.edit_end_lbl.setText(f"{dur} ms")
+        self.play_orig_btn.setEnabled(True)
+        self.trim_btn.setEnabled(True)
+        self.export_btn.setEnabled(True)
+        self.edit_status.setText("")
+
+    def _on_trim_slider_changed(self):
+        start = self.edit_start_slider.value()
+        end   = self.edit_end_slider.value()
+        if start >= end:
+            if self.sender() is self.edit_start_slider:
+                self.edit_start_slider.setValue(end - 1)
+            else:
+                self.edit_end_slider.setValue(start + 1)
+        self.edit_start_lbl.setText(f"{self.edit_start_slider.value()} ms")
+        self.edit_end_lbl.setText(f"{self.edit_end_slider.value()} ms")
+
+    def _apply_trim(self):
+        if not self._edit_audio or not os.path.isfile(self._edit_audio):
+            return
+        start = self.edit_start_slider.value()
+        end   = self.edit_end_slider.value()
+        # Work on a copy so original is preserved
+        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=os.path.join(BASE_DIR, "output"))
+        os.close(fd)
+        shutil.copy2(self._edit_audio, tmp)
+        self.engine.trim_audio(tmp, start, end)
+        self._edit_audio = tmp
+        dur = self.engine.get_duration_ms(tmp)
+        self.edit_dur_label.setText(
+            f"Duration (trimmed): {dur / 1000:.2f} s  ({dur} ms)"
+        )
+        self.edit_status.setText(f"✔ Trimmed to {start}–{end} ms")
+        self._play_file(tmp)
+
+    def _export_audio(self):
+        if not self._edit_audio or not os.path.isfile(self._edit_audio):
+            return
+        fmt = "wav" if "WAV" in self.edit_fmt_combo.currentText() else "mp3"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Audio", f"export.{fmt}",
+            f"Audio (*.{fmt});;All Files (*)",
+        )
+        if path:
+            self.engine.save_as(self._edit_audio, path, fmt)
+            self.edit_status.setText(f"✔ Saved: {os.path.basename(path)}")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main():
     app = QApplication(sys.argv)
-    window = TTSApp()
+    app.setApplicationName("EchoPilot")
+    window = EchoPilot()
     window.show()
     sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
