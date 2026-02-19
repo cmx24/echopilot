@@ -1,0 +1,32 @@
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+*.env
+
+# Model downloads
+models/
+
+# Audio files
+*.wav
+*.mp3
+*.ogg
+
+# Voice profiles
+profiles/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Other non-essential files
+*.log
+.DS_Store
