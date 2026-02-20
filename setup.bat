@@ -125,19 +125,28 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM ── 4. Install voice-cloning library (if compatible Python) ─
+REM ── 4. Install voice-cloning libraries (if compatible Python) ─
 if %CLONING%==1 (
     echo.
-    echo Installing Chatterbox TTS for voice cloning...
+    echo Installing Chatterbox TTS ^(English voice cloning^)...
     echo NOTE: A ~400 MB model is downloaded from HuggingFace on first use.
     "%VPIP%" install chatterbox-tts
     if errorlevel 1 (
-        echo.
         echo WARNING: chatterbox-tts failed to install.
-        echo Voice cloning will not be available, but the app still works.
-        echo.
     ) else (
         echo Chatterbox TTS installed successfully.
+    )
+
+    echo.
+    echo Installing Coqui XTTS v2 ^(multilingual voice cloning: pt-BR, fr, es, zh, ...^)...
+    echo NOTE: A ~2 GB model is downloaded from HuggingFace on first use.
+    "%VPIP%" install TTS
+    if errorlevel 1 (
+        echo WARNING: Coqui TTS failed to install.
+        echo Multilingual cloning ^(pt-BR, fr, es, etc.^) will not be available.
+        echo English cloning via Chatterbox will still work if it installed above.
+    ) else (
+        echo Coqui XTTS v2 installed successfully.
     )
 )
 

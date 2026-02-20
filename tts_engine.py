@@ -169,14 +169,18 @@ class TTSEngine:
             return (
                 f"Voice cloning is not available on Python {py.major}.{py.minor}.\n\n"
                 "Re-run setup.bat — it will automatically install Python 3.11,\n"
-                "create a virtual environment, and install chatterbox-tts for you.\n\n"
+                "create a virtual environment, and install both cloning engines:\n"
+                "  • Chatterbox TTS  (English cloning,  ~400 MB model)\n"
+                "  • Coqui XTTS v2   (pt-BR / fr / es / zh / …, ~2 GB model)\n\n"
                 "The app works now with 400+ Microsoft Edge TTS neural voices.\n"
                 "Voice cloning (sounds like the reference speaker) needs Python 3.11."
             )
         return (
-            "Install the voice cloning package by re-running setup.bat.\n\n"
-            "On first use, ~400 MB of model weights are downloaded from HuggingFace.\n"
-            "Chatterbox requires Python 3.10–3.11 and numpy 1.24–1.25."
+            "Re-run setup.bat to install the voice cloning engines:\n\n"
+            "  • Chatterbox TTS  — English cloning (~400 MB, downloaded on first use)\n"
+            "  • Coqui XTTS v2   — multilingual cloning: pt-BR, fr, es, zh, …\n"
+            "                       (~2 GB model, downloaded on first use)\n\n"
+            "setup.bat handles everything automatically."
         )
 
     def apply_tone_mood(self, audio_path: str, tone: str, mood: int) -> str:

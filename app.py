@@ -541,9 +541,14 @@ class EchoPilot(QMainWindow):
                 lang_code = self._resolve_lang_code(language, text)
                 params["reference_audio"] = ref
                 params["language"] = lang_code
-                self.gen_status.setText(
-                    "⏳ Cloning voice… (first run downloads model ~400 MB)"
-                )
+                if lang_code == "en":
+                    hint = "⏳ Cloning voice (English)… first run downloads ~400 MB"
+                else:
+                    hint = (
+                        f"⏳ Cloning voice ({lang_code.upper()}) via XTTS v2…"
+                        " first run downloads ~2 GB"
+                    )
+                self.gen_status.setText(hint)
             else:
                 self.gen_status.setText(f"ℹ No reference audio — using {short_name}")
         else:
