@@ -810,10 +810,12 @@ class EchoPilot(QMainWindow):
         self.clone_gender_detected.setText("Detecting…")
         self._analyze_worker = AnalyzeWorker(self.vm, path)
         self._analyze_worker.result.connect(self._on_gender_detected)
-        self._analyze_worker.error.connect(
-            lambda e: self.clone_gender_detected.setText(f"Error: {e}")
-        )
+        self._analyze_worker.error.connect(self._on_gender_detect_error)
         self._analyze_worker.start()
+
+    def _on_gender_detect_error(self, msg: str):
+        self.clone_gender_detected.setText(f"Error: {msg}")
+        self.clone_detect_btn.setEnabled(True)
 
     def _on_gender_detected(self, gender: str):
         self.clone_gender_detected.setText(f"Detected gender: {gender}")
@@ -986,6 +988,10 @@ class EchoPilot(QMainWindow):
             if ref and os.path.isfile(ref):
                 self._play_file(ref)
                 return
+        # Guard: do not replace a still-running worker — GC of a live QThread crashes PyQt5
+        if self._tts_worker and self._tts_worker.isRunning():
+            QMessageBox.information(self, "Busy", "Please wait for the current generation to finish.")
+            return
         short_name = voice.get("short_name", "en-US-AriaNeural")
         self._tts_worker = TTSWorker(self.engine, {
             "text": "Hello, this is a voice preview.",
@@ -1230,6 +1236,12 @@ class EchoPilot(QMainWindow):
             return
         start = self.edit_start_slider.value()
         end   = self.edit_end_slider.value()
+        if start >= end:
+            QMessageBox.warning(
+                self, "Invalid Trim Range",
+                f"Start ({start} ms) must be less than End ({end} ms).",
+            )
+            return
         # Work on a copy so original is preserved
         out_dir = os.path.join(BASE_DIR, "output")
         os.makedirs(out_dir, exist_ok=True)

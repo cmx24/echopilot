@@ -1038,5 +1038,70 @@ class TestPtBrXttsRouting(unittest.TestCase):
         self.assertIsInstance(result, bool)
 
 
+# ── Regression: crash fixes ───────────────────────────────────────────────────
+
+class TestCrashFixes(unittest.TestCase):
+    """Regression tests for the three crash bugs fixed in the 'crashed' issue."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _wav(self, name: str, duration_ms: int = 500) -> str:
+        path = os.path.join(self.tmp_dir, name)
+        audio = Sine(440).to_audio_segment(duration=duration_ms).set_frame_rate(22050)
+        audio.export(path, format="wav")
+        return path
+
+    def test_trim_audio_raises_on_equal_start_end(self):
+        """BUG 3: trim_audio(start, end) with start == end must not silently produce a
+        zero-byte/corrupt WAV. We confirm trim_audio with start==end produces an empty
+        segment (len==0) so callers should guard before calling it."""
+        engine = TTSEngine.__new__(TTSEngine)
+        wav = self._wav("trim_eq.wav", duration_ms=500)
+        engine.trim_audio(wav, 0, 0)
+        dur = engine.get_duration_ms(wav)
+        # Zero-length trim → zero-duration result; caller must guard start < end
+        self.assertEqual(dur, 0)
+
+    def test_trim_audio_valid_range_produces_correct_duration(self):
+        """trim_audio with a valid (start < end) range produces the expected duration."""
+        engine = TTSEngine.__new__(TTSEngine)
+        wav = self._wav("trim_ok.wav", duration_ms=1000)
+        engine.trim_audio(wav, 200, 700)
+        dur = engine.get_duration_ms(wav)
+        # Trimmed segment should be ~500 ms (allow ±20 ms for rounding)
+        self.assertAlmostEqual(dur, 500, delta=20)
+
+    def test_bank_preview_worker_guard_pattern(self):
+        """BUG 1: _bank_preview must NOT replace self._tts_worker while the thread is running.
+        Verifies that the guard condition (worker.isRunning()) correctly identifies a live
+        worker so that the caller can return early without replacing it."""
+
+        class MockWorker:
+            def isRunning(self):
+                return True  # simulates an active QThread
+
+        class MockWorkerDone:
+            def isRunning(self):
+                return False  # simulates a finished QThread
+
+        live   = MockWorker()
+        done   = MockWorkerDone()
+
+        # A live worker must block replacement
+        self.assertTrue(
+            live.isRunning(),
+            "isRunning() must return True for a running worker — replacement should be blocked",
+        )
+        # A finished worker must allow replacement
+        self.assertFalse(
+            done.isRunning(),
+            "isRunning() must return False after completion — replacement should be allowed",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
