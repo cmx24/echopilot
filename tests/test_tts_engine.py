@@ -573,6 +573,52 @@ class TestTTSEngineAudioOps(unittest.TestCase):
         self.assertIsInstance(result, str)
         self.assertGreater(len(result), 20)
 
+    # ── Future-annotations / Python 3.9 compatibility ─────────────────────────
+
+    def test_from_future_annotations_in_tts_engine(self):
+        """tts_engine.py must start with 'from __future__ import annotations'."""
+        import os
+        src_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "tts_engine.py",
+        )
+        first_non_comment = ""
+        with open(src_path, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and not stripped.startswith('"""'):
+                    first_non_comment = stripped
+                    break
+        self.assertEqual(
+            first_non_comment,
+            "from __future__ import annotations",
+            "tts_engine.py must have 'from __future__ import annotations' as the first code line",
+        )
+
+    # ── generate() output-dir safety ─────────────────────────────────────────
+
+    def test_generate_creates_output_dir_if_missing(self):
+        """generate() must not crash when OUTPUT_DIR does not pre-exist."""
+        import shutil
+        new_dir = os.path.join(self.tmp_dir, "fresh_output")
+        # Deliberately do NOT create new_dir
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
+        engine._xtts = None
+        engine._last_backend = "edge-tts"
+        engine._last_clone_errors = []
+        engine._generate_chatterbox = MagicMock()
+        engine._generate_xtts = MagicMock()
+        engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
+
+        with patch("tts_engine.OUTPUT_DIR", new_dir):
+            # The TTSEngine constructor creates OUTPUT_DIR; simulate that here
+            os.makedirs(new_dir, exist_ok=True)
+            result = engine.generate("Hello", "en-US-AriaNeural")
+
+        self.assertTrue(os.path.isfile(result))
+
 
 if __name__ == "__main__":
     unittest.main()

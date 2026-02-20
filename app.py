@@ -1,5 +1,7 @@
 """EchoPilot — Text-to-Speech Studio (PyQt5 GUI)."""
 
+from __future__ import annotations
+
 import os
 import platform
 import re
@@ -9,7 +11,6 @@ import sys
 import tempfile
 
 from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
-from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -141,6 +142,7 @@ class EchoPilot(QMainWindow):
         self._play_proc: subprocess.Popen = None
         self._font_size: int = 13
         self._cloning_backend: str | None = TTSEngine.cloning_backend()
+        self._cloning_warn_shown: bool = False   # only show the install-instructions dialog once
 
         # In-app audio player (avoids launching the system media app)
         if _HAS_QTMULTIMEDIA:
@@ -167,7 +169,6 @@ class EchoPilot(QMainWindow):
 
         # Warn at startup if no voice cloning backend is available
         if self._cloning_backend is None:
-            import sys
             py = sys.version_info
             if py >= (3, 12):
                 self.statusBar().showMessage(
@@ -460,8 +461,9 @@ class EchoPilot(QMainWindow):
             # Cloning was attempted but fell back; show actionable install instructions
             reason = errors[0].split(":")[0]   # e.g. "ChatterboxTTS not installed"
             self.gen_status.setText(f"⚠ Cloning failed ({reason}) — used {backend}")
-            # Only show the dialog if the failure was a missing package
-            if any("not installed" in e for e in errors):
+            # Only show the dialog once per session (not on every generate call)
+            if not self._cloning_warn_shown and any("not installed" in e for e in errors):
+                self._cloning_warn_shown = True
                 QMessageBox.warning(
                     self,
                     "Voice Cloning Not Available",
@@ -480,6 +482,9 @@ class EchoPilot(QMainWindow):
     def _on_generate_error(self, msg: str):
         self.gen_status.setText("✘ Error")
         self.gen_btn.setEnabled(True)
+        self.gen_play_btn.setEnabled(self._current_audio is not None)
+        self.gen_stop_btn.setEnabled(True)
+        self.gen_save_btn.setEnabled(self._current_audio is not None)
         QMessageBox.critical(self, "Generation Error", msg)
 
     def _save_current_audio(self):
@@ -528,7 +533,6 @@ class EchoPilot(QMainWindow):
 
         # Cloning backend availability banner
         if self._cloning_backend is None:
-            import sys
             py = sys.version_info
             warn_label = QLabel(
                 f"⚠  Voice cloning is NOT available — "
@@ -1063,7 +1067,9 @@ class EchoPilot(QMainWindow):
 
     def _copy_edit_to_temp(self) -> str:
         """Copy the current edit audio to a new temp WAV and return its path."""
-        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=os.path.join(BASE_DIR, "output"))
+        out_dir = os.path.join(BASE_DIR, "output")
+        os.makedirs(out_dir, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=out_dir)
         os.close(fd)
         shutil.copy2(self._edit_audio, tmp)
         return tmp
@@ -1085,7 +1091,9 @@ class EchoPilot(QMainWindow):
         start = self.edit_start_slider.value()
         end   = self.edit_end_slider.value()
         # Work on a copy so original is preserved
-        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=os.path.join(BASE_DIR, "output"))
+        out_dir = os.path.join(BASE_DIR, "output")
+        os.makedirs(out_dir, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=out_dir)
         os.close(fd)
         shutil.copy2(self._edit_audio, tmp)
         self.engine.trim_audio(tmp, start, end)

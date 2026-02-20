@@ -1,5 +1,7 @@
 """TTS engine for EchoPilot — edge-tts primary, pyttsx3 offline fallback."""
 
+from __future__ import annotations
+
 import asyncio
 import os
 import tempfile
