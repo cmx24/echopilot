@@ -132,6 +132,51 @@ class TTSEngine:
         """Return duration of *audio_path* in milliseconds."""
         return len(AudioSegment.from_file(audio_path))
 
+    @staticmethod
+    def cloning_backend() -> str | None:
+        """Return the name of the first available voice-cloning backend, or None.
+
+        Probes import availability without loading model weights.
+
+        :returns: ``"chatterbox"``, ``"xtts"``, or ``None`` if neither is installed.
+        """
+        try:
+            import chatterbox.tts  # noqa: F401
+            return "chatterbox"
+        except ImportError:
+            pass
+        try:
+            import TTS  # noqa: F401
+            return "xtts"
+        except ImportError:
+            pass
+        return None
+
+    @staticmethod
+    def cloning_install_instructions() -> str:
+        """Return a user-facing string with install instructions for voice cloning."""
+        import sys
+        py = sys.version_info
+        if py >= (3, 12):
+            return (
+                "Voice cloning requires Python 3.11 or older.\n\n"
+                f"You are running Python {py.major}.{py.minor}.{py.micro}.\n\n"
+                "Options:\n"
+                "  1. Install Python 3.11 from https://www.python.org/downloads/\n"
+                "     and run setup.bat again — this will install chatterbox-tts.\n\n"
+                "  2. Install Python 3.11, create a virtual environment:\n"
+                "     py -3.11 -m venv venv311\n"
+                "     venv311\\Scripts\\activate\n"
+                "     pip install -r requirements.txt\n"
+                "     pip install chatterbox-tts\n"
+            )
+        return (
+            "Install the voice cloning package by running setup.bat, or:\n\n"
+            "    pip install chatterbox-tts\n\n"
+            "On first use, ~400 MB of model weights are downloaded from HuggingFace.\n"
+            "Chatterbox requires Python 3.10–3.11 and numpy 1.24–1.25."
+        )
+
     def apply_tone_mood(self, audio_path: str, tone: str, mood: int) -> str:
         """
         Apply *tone* preset and *mood* (1–10) to *audio_path* in place.

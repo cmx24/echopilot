@@ -24,10 +24,31 @@ python -m pip install --upgrade pip
 python -m pip install PyQt5 edge-tts pydub librosa soundfile numpy scipy langdetect mutagen
 
 echo.
-echo Installing Chatterbox TTS (voice cloning, Python 3.10+)...
+echo Installing Chatterbox TTS (voice cloning)...
+echo Requires Python 3.10-3.11 and numpy 1.24-1.25.
 echo NOTE: ~400 MB model is downloaded from HuggingFace on first use of Clone Voice.
 echo.
 python -m pip install chatterbox-tts
+if errorlevel 1 (
+    echo.
+    echo ============================================================
+    echo  WARNING: chatterbox-tts failed to install.
+    echo  Voice cloning will NOT be available.
+    echo.
+    echo  Most common cause: Python 3.12+ is not supported.
+    echo  chatterbox-tts requires Python 3.10 or 3.11.
+    echo.
+    echo  To enable voice cloning:
+    echo    1. Install Python 3.11 from https://www.python.org/downloads/
+    echo    2. Run this setup.bat again with Python 3.11
+    echo  OR
+    echo    py -3.11 -m pip install chatterbox-tts
+    echo.
+    echo  The app will still work with 400+ edge-tts neural voices.
+    echo ============================================================
+    echo.
+    pause
+)
 
 echo.
 

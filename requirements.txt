@@ -4,10 +4,11 @@ PyQt5
 # TTS backends
 edge-tts          # primary: 400+ neural voices via Microsoft Edge TTS
 pyttsx3           # offline fallback using system TTS engine
-chatterbox-tts    # Chatterbox voice cloning — Python 3.10+, ~400 MB model on first use
-# TTS            # Coqui XTTS v2 voice cloning — requires Python 3.9–3.11 only
-                  # Install manually on Python 3.9–3.11: pip install TTS
-                  # On Python 3.12+ this package is unavailable; Chatterbox is used instead
+# Voice cloning backends — install manually (see setup.bat):
+#   chatterbox-tts  → Python 3.10–3.11 only (numpy 1.24-1.25 required; no wheels for 3.12)
+#                     pip install chatterbox-tts
+#   TTS             → Coqui XTTS v2, Python 3.9–3.11 only
+#                     pip install TTS
 
 # Audio processing
 pydub             # manipulation, trim, speed, mp3/wav export

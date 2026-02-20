@@ -535,6 +535,44 @@ class TestTTSEngineAudioOps(unittest.TestCase):
         stretched = TE._change_speed(audio, 1.0)
         self.assertAlmostEqual(len(stretched), len(audio), delta=100)
 
+    # ── cloning_backend() ─────────────────────────────────────────────────────
+
+    def test_cloning_backend_returns_string_or_none(self):
+        """cloning_backend() must return a str or None, never raise."""
+        result = TTSEngine.cloning_backend()
+        self.assertIn(result, (None, "chatterbox", "xtts"))
+
+    def test_cloning_backend_chatterbox_when_importable(self):
+        """cloning_backend() returns 'chatterbox' when chatterbox.tts is importable."""
+        import importlib, types
+        fake_mod = types.ModuleType("chatterbox")
+        fake_mod.tts = types.ModuleType("chatterbox.tts")
+        with patch.dict("sys.modules", {"chatterbox": fake_mod, "chatterbox.tts": fake_mod.tts}):
+            result = TTSEngine.cloning_backend()
+        self.assertEqual(result, "chatterbox")
+
+    def test_cloning_backend_xtts_when_chatterbox_missing(self):
+        """cloning_backend() returns 'xtts' when only TTS is importable."""
+        import types
+        fake_tts = types.ModuleType("TTS")
+        with patch.dict("sys.modules", {"chatterbox": None, "chatterbox.tts": None,
+                                        "TTS": fake_tts}):
+            result = TTSEngine.cloning_backend()
+        self.assertEqual(result, "xtts")
+
+    def test_cloning_backend_none_when_both_missing(self):
+        """cloning_backend() returns None when neither package is importable."""
+        with patch.dict("sys.modules", {"chatterbox": None, "chatterbox.tts": None,
+                                        "TTS": None}):
+            result = TTSEngine.cloning_backend()
+        self.assertIsNone(result)
+
+    def test_cloning_install_instructions_returns_nonempty_string(self):
+        """cloning_install_instructions() must return a non-empty string."""
+        result = TTSEngine.cloning_install_instructions()
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 20)
+
 
 if __name__ == "__main__":
     unittest.main()

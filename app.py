@@ -140,6 +140,7 @@ class EchoPilot(QMainWindow):
         self._analyze_worker: AnalyzeWorker = None
         self._play_proc: subprocess.Popen = None
         self._font_size: int = 13
+        self._cloning_backend: str | None = TTSEngine.cloning_backend()
 
         # In-app audio player (avoids launching the system media app)
         if _HAS_QTMULTIMEDIA:
@@ -163,6 +164,22 @@ class EchoPilot(QMainWindow):
         tabs.addTab(self._build_bank_tab(),       "📂  Voice Bank")
         tabs.addTab(self._build_edit_tab(),       "✂   Edit & Save")
         self.setStyleSheet(self._STYLE)
+
+        # Warn at startup if no voice cloning backend is available
+        if self._cloning_backend is None:
+            import sys
+            py = sys.version_info
+            if py >= (3, 12):
+                self.statusBar().showMessage(
+                    f"⚠ Voice cloning unavailable on Python {py.major}.{py.minor} "
+                    f"— requires Python 3.11.  Standard TTS (edge-tts) is active.",
+                    0,
+                )
+            else:
+                self.statusBar().showMessage(
+                    "⚠ Voice cloning package not installed — run setup.bat to enable it.",
+                    0,
+                )
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -440,9 +457,18 @@ class EchoPilot(QMainWindow):
             label = "ChatterboxTTS" if backend == "chatterbox" else "XTTS v2"
             self.gen_status.setText(f"✔ Done — voice cloned with {label}")
         elif errors:
-            # Cloning was attempted but fell back
+            # Cloning was attempted but fell back; show actionable install instructions
             reason = errors[0].split(":")[0]   # e.g. "ChatterboxTTS not installed"
             self.gen_status.setText(f"⚠ Cloning failed ({reason}) — used {backend}")
+            # Only show the dialog if the failure was a missing package
+            if any("not installed" in e for e in errors):
+                QMessageBox.warning(
+                    self,
+                    "Voice Cloning Not Available",
+                    "⚠  Voice cloning failed — the output uses a standard neural voice "
+                    "and does NOT sound like your reference speaker.\n\n"
+                    + TTSEngine.cloning_install_instructions(),
+                )
         else:
             self.gen_status.setText(f"✔ Done — {backend}")
 
@@ -499,6 +525,33 @@ class EchoPilot(QMainWindow):
         dur_row.addWidget(self.clone_ref_duration)
         dur_row.addStretch()
         rl.addLayout(dur_row)
+
+        # Cloning backend availability banner
+        if self._cloning_backend is None:
+            import sys
+            py = sys.version_info
+            warn_label = QLabel(
+                f"⚠  Voice cloning is NOT available — "
+                + (
+                    f"Python {py.major}.{py.minor} is not supported (requires 3.11).  "
+                    "Install Python 3.11 and re-run setup.bat."
+                    if py >= (3, 12) else
+                    "Run setup.bat to install the chatterbox-tts package."
+                )
+            )
+            warn_label.setStyleSheet(
+                "color: #f38ba8; font-size: 11px; font-weight: bold; "
+                "padding: 4px; background: #45475a; border-radius: 4px;"
+            )
+            warn_label.setWordWrap(True)
+            rl.addWidget(warn_label)
+        else:
+            ok_label = QLabel(
+                f"✔  Voice cloning ready ({self._cloning_backend}) — "
+                "model downloads ~400 MB on first use."
+            )
+            ok_label.setStyleSheet("color: #a6e3a1; font-size: 11px;")
+            rl.addWidget(ok_label)
 
         detect_row = QHBoxLayout()
         self.clone_detect_btn = QPushButton("🔍  Auto-Detect Gender")
