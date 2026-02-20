@@ -25,6 +25,8 @@ class TTSEngine:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         self._xtts = None         # Coqui XTTS v2 instance, loaded on demand
         self._chatterbox = None   # ChatterboxTTS instance, loaded on demand
+        self._last_backend: str = "edge-tts"    # updated after each generate()
+        self._last_clone_errors: list = []      # errors from failed clone attempts
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -45,9 +47,13 @@ class TTSEngine:
         3. **edge-tts** — neural TTS without cloning (fallback).
         4. **pyttsx3** — offline system TTS (last resort).
 
+        After generation ``self._last_backend`` names the backend that produced
+        the audio.  ``self._last_clone_errors`` lists any errors that caused
+        cloning to fall back, so the UI can surface them to the user.
+
         :param tone:            One of TONES; applies speed/volume post-processing.
         :param mood:            1–10 scale; 5 is neutral (no extra effect).
-        :param reference_audio: Path to a WAV/MP3 reference recording (≥ 3 s).
+        :param reference_audio: Path to a WAV/MP3 reference recording (≥ 5 s recommended).
         :param language:        2-letter BCP-47 code for XTTS (e.g. ``'en'``, ``'fr'``).
         :returns: Path to the generated WAV file.
         """
@@ -55,37 +61,43 @@ class TTSEngine:
             fd, output_path = tempfile.mkstemp(suffix=".wav", dir=OUTPUT_DIR)
             os.close(fd)
 
+        self._last_clone_errors = []
+
         # 1. Try Chatterbox voice cloning (Python 3.10+, works on 3.12)
         if reference_audio and os.path.isfile(reference_audio):
             try:
                 self._generate_chatterbox(text, reference_audio, output_path)
+                self._last_backend = "chatterbox"
                 if tone != "Normal" or mood != 5:
                     self._apply_tone_mood(output_path, tone, mood)
                 return output_path
-            except ImportError:
-                pass  # chatterbox-tts not installed → try XTTS v2
-            except Exception:
-                pass  # Chatterbox inference error → try XTTS v2
+            except ImportError as exc:
+                self._last_clone_errors.append(f"ChatterboxTTS not installed: {exc}")
+            except Exception as exc:
+                self._last_clone_errors.append(f"ChatterboxTTS error: {exc}")
 
         # 2. Try Coqui XTTS v2 (Python 3.9–3.11 only)
         if reference_audio and os.path.isfile(reference_audio):
             try:
                 self._generate_xtts(text, reference_audio, language, output_path)
+                self._last_backend = "xtts"
                 if tone != "Normal" or mood != 5:
                     self._apply_tone_mood(output_path, tone, mood)
                 return output_path
-            except ImportError:
-                pass  # TTS package not installed → fall through to edge-tts
-            except Exception:
-                pass  # XTTS inference error → fall through to edge-tts
+            except ImportError as exc:
+                self._last_clone_errors.append(f"XTTS v2 not installed: {exc}")
+            except Exception as exc:
+                self._last_clone_errors.append(f"XTTS v2 error: {exc}")
 
         # 3. edge-tts (primary neural voices)
         try:
             self._generate_edge(text, voice_short_name, output_path)
+            self._last_backend = "edge-tts"
         except Exception as edge_err:
             # 4. pyttsx3 offline fallback
             try:
                 self._generate_pyttsx3(text, output_path)
+                self._last_backend = "pyttsx3"
             except Exception as tts_err:
                 raise RuntimeError(
                     f"edge-tts failed ({edge_err}); offline fallback also failed ({tts_err})"
@@ -253,8 +265,35 @@ class TTSEngine:
 
     @staticmethod
     def _change_speed(audio: AudioSegment, factor: float) -> AudioSegment:
-        """Resample to change playback speed (also shifts pitch slightly)."""
-        new_rate = int(audio.frame_rate * factor)
+        """Pitch-preserving time-stretch using WSOLA (via librosa).
+
+        Unlike the naive frame-rate resampling approach, this stretches or
+        compresses the waveform in the time domain so speed changes without
+        altering the speaker's pitch — critical for keeping cloned voices
+        recognisable after tone/mood post-processing.
+        """
+        import numpy as np
+        import librosa
+
+        # Convert to float32 mono
+        raw = np.array(audio.get_array_of_samples(), dtype=np.float32)
+        peak = float(1 << (8 * audio.sample_width - 1))
+        samples = raw / peak
+        if audio.channels == 2:
+            samples = samples.reshape(-1, 2).mean(axis=1)
+
+        # WSOLA time-stretch (rate > 1 → faster, rate < 1 → slower)
+        stretched = librosa.effects.time_stretch(samples, rate=float(factor))
+
+        # Back to pydub int samples
+        stretched_int = (stretched * peak).clip(-peak, peak - 1).astype(
+            np.dtype(f"<i{audio.sample_width}")
+        )
         return audio._spawn(
-            audio.raw_data, overrides={"frame_rate": new_rate}
-        ).set_frame_rate(audio.frame_rate)
+            stretched_int.tobytes(),
+            overrides={
+                "frame_rate": audio.frame_rate,
+                "channels": 1,
+                "sample_width": audio.sample_width,
+            },
+        )

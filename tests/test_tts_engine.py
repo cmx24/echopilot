@@ -420,6 +420,121 @@ class TestTTSEngineAudioOps(unittest.TestCase):
 
         self.assertEqual(captured["language"], "fr")
 
+    # ── Backend tracking ──────────────────────────────────────────────────────
+
+    def test_last_backend_set_to_chatterbox_on_success(self):
+        """_last_backend must be 'chatterbox' when Chatterbox succeeds."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_track_cb"), exist_ok=True)
+        ref = self._wav("ref_track_cb.wav", 3000)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
+        engine._xtts = None
+        engine._last_backend = "edge-tts"
+        engine._last_clone_errors = []
+        engine._generate_chatterbox = MagicMock(side_effect=lambda t, r, p: _make_wav(p, 500))
+        engine._generate_xtts = MagicMock()
+        engine._generate_edge = MagicMock()
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_track_cb")):
+            engine.generate("Hi", "en-US-AriaNeural", reference_audio=ref)
+
+        self.assertEqual(engine._last_backend, "chatterbox")
+
+    def test_last_backend_set_to_edge_on_fallback(self):
+        """_last_backend must be 'edge-tts' when cloning fails and edge-tts runs."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_track_edge"), exist_ok=True)
+        ref = self._wav("ref_track_edge.wav", 3000)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
+        engine._xtts = None
+        engine._last_backend = "edge-tts"
+        engine._last_clone_errors = []
+        engine._generate_chatterbox = MagicMock(side_effect=ImportError("no cb"))
+        engine._generate_xtts = MagicMock(side_effect=ImportError("no xtts"))
+        engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_track_edge")):
+            engine.generate("Hi", "en-US-AriaNeural", reference_audio=ref)
+
+        self.assertEqual(engine._last_backend, "edge-tts")
+
+    def test_last_clone_errors_populated_on_fallback(self):
+        """_last_clone_errors must contain error descriptions when cloning fails."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_track_err"), exist_ok=True)
+        ref = self._wav("ref_track_err.wav", 3000)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
+        engine._xtts = None
+        engine._last_backend = "edge-tts"
+        engine._last_clone_errors = []
+        engine._generate_chatterbox = MagicMock(side_effect=ImportError("cb missing"))
+        engine._generate_xtts = MagicMock(side_effect=RuntimeError("xtts crashed"))
+        engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_track_err")):
+            engine.generate("Hi", "en-US-AriaNeural", reference_audio=ref)
+
+        self.assertEqual(len(engine._last_clone_errors), 2)
+        self.assertIn("Chatterbox", engine._last_clone_errors[0])
+        self.assertIn("XTTS", engine._last_clone_errors[1])
+
+    def test_last_clone_errors_reset_each_call(self):
+        """_last_clone_errors must be cleared at the start of each generate() call."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_reset"), exist_ok=True)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
+        engine._xtts = None
+        engine._last_backend = "edge-tts"
+        engine._last_clone_errors = ["stale error from previous run"]
+        engine._generate_chatterbox = MagicMock()
+        engine._generate_xtts = MagicMock()
+        engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_reset")):
+            engine.generate("Hi", "en-US-AriaNeural")
+
+        self.assertEqual(engine._last_clone_errors, [])
+
+    # ── _change_speed (pitch-preserving WSOLA) ────────────────────────────────
+
+    def test_change_speed_faster_shortens_duration(self):
+        """factor > 1 must produce a shorter segment."""
+        path = self._wav("speed_fast.wav", 2000)
+        audio = AudioSegment.from_file(path)
+        from tts_engine import TTSEngine as TE
+        stretched = TE._change_speed(audio, 1.5)
+        # Faster → fewer frames
+        self.assertLess(len(stretched), len(audio))
+
+    def test_change_speed_slower_lengthens_duration(self):
+        """factor < 1 must produce a longer segment."""
+        path = self._wav("speed_slow.wav", 2000)
+        audio = AudioSegment.from_file(path)
+        from tts_engine import TTSEngine as TE
+        stretched = TE._change_speed(audio, 0.7)
+        # Slower → more frames
+        self.assertGreater(len(stretched), len(audio))
+
+    def test_change_speed_preserves_sample_rate(self):
+        """Frame rate must be identical before and after time-stretch."""
+        path = self._wav("speed_rate.wav", 1000)
+        audio = AudioSegment.from_file(path)
+        from tts_engine import TTSEngine as TE
+        stretched = TE._change_speed(audio, 1.2)
+        self.assertEqual(stretched.frame_rate, audio.frame_rate)
+
+    def test_change_speed_identity_near_noop(self):
+        """factor ≈ 1.0 must keep duration approximately the same."""
+        path = self._wav("speed_id.wav", 2000)
+        audio = AudioSegment.from_file(path)
+        from tts_engine import TTSEngine as TE
+        stretched = TE._change_speed(audio, 1.0)
+        self.assertAlmostEqual(len(stretched), len(audio), delta=100)
+
 
 if __name__ == "__main__":
     unittest.main()

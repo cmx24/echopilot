@@ -433,7 +433,19 @@ class EchoPilot(QMainWindow):
         self._current_audio = path
         dur = self.engine.get_duration_ms(path) / 1000.0
         self.gen_audio_info.setText(f"✔ {os.path.basename(path)}  ({dur:.1f} s)")
-        self.gen_status.setText("✔ Done")
+
+        backend = self.engine._last_backend
+        errors  = self.engine._last_clone_errors
+        if backend in ("chatterbox", "xtts"):
+            label = "ChatterboxTTS" if backend == "chatterbox" else "XTTS v2"
+            self.gen_status.setText(f"✔ Done — voice cloned with {label}")
+        elif errors:
+            # Cloning was attempted but fell back
+            reason = errors[0].split(":")[0]   # e.g. "ChatterboxTTS not installed"
+            self.gen_status.setText(f"⚠ Cloning failed ({reason}) — used {backend}")
+        else:
+            self.gen_status.setText(f"✔ Done — {backend}")
+
         self.gen_btn.setEnabled(True)
         self.gen_play_btn.setEnabled(True)
         self.gen_stop_btn.setEnabled(True)
@@ -479,6 +491,14 @@ class EchoPilot(QMainWindow):
         browse_btn.clicked.connect(self._browse_reference)
         row.addWidget(browse_btn)
         rl.addLayout(row)
+
+        # Duration + quality hint row
+        dur_row = QHBoxLayout()
+        self.clone_ref_duration = QLabel("Duration: —  |  Recommend ≥ 5 s of clean speech for best cloning")
+        self.clone_ref_duration.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        dur_row.addWidget(self.clone_ref_duration)
+        dur_row.addStretch()
+        rl.addLayout(dur_row)
 
         detect_row = QHBoxLayout()
         self.clone_detect_btn = QPushButton("🔍  Auto-Detect Gender")
@@ -565,6 +585,25 @@ class EchoPilot(QMainWindow):
             self.clone_file_edit.setText(path)
             self.clone_detect_btn.setEnabled(True)
             self.clone_status.setText("")
+            self._update_ref_duration(path)
+
+    def _update_ref_duration(self, path: str):
+        """Display reference audio duration and warn if too short for cloning."""
+        try:
+            dur_s = self.engine.get_duration_ms(path) / 1000.0
+            if dur_s < 3:
+                label = f"Duration: {dur_s:.1f} s  ⚠ Too short — minimum 3 s required"
+                self.clone_ref_duration.setStyleSheet("color: #f38ba8; font-size: 11px;")
+            elif dur_s < 5:
+                label = f"Duration: {dur_s:.1f} s  ⚠ Short — 5–15 s recommended for best results"
+                self.clone_ref_duration.setStyleSheet("color: #fab387; font-size: 11px;")
+            else:
+                label = f"Duration: {dur_s:.1f} s  ✔ Good length for voice cloning"
+                self.clone_ref_duration.setStyleSheet("color: #a6e3a1; font-size: 11px;")
+            self.clone_ref_duration.setText(label)
+        except Exception:
+            self.clone_ref_duration.setText("Duration: unable to read file")
+            self.clone_ref_duration.setStyleSheet("color: #a6adc8; font-size: 11px;")
 
     def _detect_gender(self):
         path = self.clone_file_edit.text()
@@ -605,6 +644,31 @@ class EchoPilot(QMainWindow):
         language = self.clone_lang_combo.currentText()
         notes    = self.clone_notes_edit.text()
         ref_src  = self.clone_file_edit.text()
+
+        # Warn if reference audio is too short for quality cloning
+        if ref_src and os.path.isfile(ref_src):
+            try:
+                dur_s = self.engine.get_duration_ms(ref_src) / 1000.0
+                if dur_s < 3:
+                    QMessageBox.warning(
+                        self, "Reference Too Short",
+                        f"The reference recording is only {dur_s:.1f} s.\n\n"
+                        "Voice cloning requires at least 3 seconds, and works best\n"
+                        "with 5–15 seconds of clean, noise-free speech.\n\n"
+                        "Please select a longer recording.",
+                    )
+                    return
+                if dur_s < 5:
+                    ans = QMessageBox.question(
+                        self, "Short Reference Recording",
+                        f"The reference is {dur_s:.1f} s (recommended: ≥ 5 s).\n\n"
+                        "Short recordings may produce poor voice similarity.\n"
+                        "Save anyway?",
+                    )
+                    if ans != QMessageBox.Yes:
+                        return
+            except Exception:
+                pass
 
         # Copy reference audio into profiles/
         ref_dest = ""
