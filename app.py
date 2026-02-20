@@ -173,12 +173,12 @@ class EchoPilot(QMainWindow):
             if py >= (3, 12):
                 self.statusBar().showMessage(
                     f"⚠ Voice cloning unavailable on Python {py.major}.{py.minor} "
-                    f"— requires Python 3.11.  Standard TTS (edge-tts) is active.",
+                    f"— re-run setup.bat to auto-install Python 3.11 and enable cloning.",
                     0,
                 )
             else:
                 self.statusBar().showMessage(
-                    "⚠ Voice cloning package not installed — run setup.bat to enable it.",
+                    "⚠ Voice cloning package not installed — re-run setup.bat to enable it.",
                     0,
                 )
 
@@ -537,10 +537,10 @@ class EchoPilot(QMainWindow):
             warn_label = QLabel(
                 f"⚠  Voice cloning is NOT available — "
                 + (
-                    f"Python {py.major}.{py.minor} is not supported (requires 3.11).  "
-                    "Install Python 3.11 and re-run setup.bat."
+                    f"Python {py.major}.{py.minor} detected.  "
+                    "Re-run setup.bat — it will automatically install Python 3.11 and enable cloning."
                     if py >= (3, 12) else
-                    "Run setup.bat to install the chatterbox-tts package."
+                    "Re-run setup.bat to install the chatterbox-tts package."
                 )
             )
             warn_label.setStyleSheet(

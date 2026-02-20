@@ -1,89 +1,148 @@
 @echo off
-REM EchoPilot - first-time setup
-REM Run this once to install all Python dependencies.
+setlocal EnableDelayedExpansion
+REM ============================================================
+REM  EchoPilot Setup  —  fully automated
+REM  Run once; re-run any time to repair or update.
+REM ============================================================
 
 echo ============================================================
 echo  EchoPilot Setup
 echo ============================================================
 echo.
 
-REM Check that Python is on PATH
+cd /d "%~dp0"
+
+REM ── 1. Find the best Python to build the venv with ───────────
+REM  We need Python 3.11 (or below) to include the voice-cloning
+REM  library (chatterbox-tts requires numpy 1.24-1.25 which has
+REM  no pre-built wheels for Python 3.12+).
+REM  Strategy:
+REM    a) If system Python < 3.12 → use it directly.
+REM    b) If system Python >= 3.12 → look for py -3.11.
+REM    c) If not found → install Python 3.11 via winget silently.
+REM    d) If winget unavailable → fall back to system Python
+REM       (app works; cloning unavailable).
+
+REM VENV_PYEXE is the full command used to create and run the venv.
+set VENV_PYEXE=
+set PYVER=
+set PYMINOR=0
+set CLONING=0
+
+REM Check system Python
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Python not found on PATH.
-    echo Please install Python 3.10+ from https://www.python.org/downloads/
-    echo Make sure to tick "Add Python to PATH" during installation.
+    echo No Python found on PATH. Trying winget to install Python 3.11...
+    goto :TRY_WINGET_PY311
+)
+
+for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set PYVER=%%v
+for /f "tokens=2 delims=." %%m in ("%PYVER%") do set PYMINOR=%%m
+echo System Python: %PYVER%
+
+if %PYMINOR% LSS 12 (
+    echo Python %PYVER% supports voice cloning directly.
+    set VENV_PYEXE=python
+    set CLONING=1
+    goto :BUILD_VENV
+)
+
+REM System Python >= 3.12 — look for 3.11 via py launcher
+echo Python %PYVER% detected. Looking for Python 3.11 for voice cloning...
+py -3.11 --version >nul 2>&1
+if not errorlevel 1 (
+    for /f "tokens=2 delims= " %%v in ('py -3.11 --version 2^>^&1') do echo Found py -3.11: %%v
+    REM Resolve the actual Python 3.11 executable path so venv commands use a plain path
+    for /f %%p in ('py -3.11 -c "import sys; print(sys.executable)"') do set VENV_PYEXE=%%p
+    set CLONING=1
+    goto :BUILD_VENV
+)
+
+REM Python 3.11 not installed — try winget
+echo Python 3.11 not found. Attempting automatic install via winget...
+:TRY_WINGET_PY311
+winget --version >nul 2>&1
+if errorlevel 1 (
+    echo winget not available. Skipping automatic Python 3.11 install.
+    goto :NO_PY311
+)
+
+winget install -e --id Python.Python.3.11 --silent --accept-package-agreements --accept-source-agreements
+if errorlevel 1 (
+    echo winget install did not succeed. Skipping automatic Python 3.11 install.
+    goto :NO_PY311
+)
+
+REM Verify the py launcher can now see Python 3.11.
+REM (The py launcher reads registry entries, so it detects the new install
+REM  without needing to refresh PATH in the current shell.)
+py -3.11 --version >nul 2>&1
+if errorlevel 1 (
+    echo Python 3.11 was installed but the py launcher cannot find it yet.
+    echo Please close this window and re-run setup.bat.
+    pause
+    exit /b 1
+)
+for /f "tokens=2 delims= " %%v in ('py -3.11 --version 2^>^&1') do echo Installed: Python %%v
+for /f %%p in ('py -3.11 -c "import sys; print(sys.executable)"') do set VENV_PYEXE=%%p
+set CLONING=1
+goto :BUILD_VENV
+
+:NO_PY311
+REM Fall back to system Python — no cloning, but app still works
+if "%VENV_PYEXE%"=="" set VENV_PYEXE=python
+echo.
+echo ============================================================
+echo  NOTE: Python 3.11 could not be found or installed.
+echo  Voice cloning will NOT be available.
+echo  EchoPilot will work with 400+ Microsoft Edge TTS voices.
+echo ============================================================
+echo.
+
+REM ── 2. Create / refresh virtual environment ─────────────────
+:BUILD_VENV
+echo.
+echo Setting up virtual environment in .\venv ...
+"%VENV_PYEXE%" -m venv venv
+if errorlevel 1 (
+    echo ERROR: Failed to create virtual environment.
     pause
     exit /b 1
 )
 
-REM Detect Python version for compatibility checks
-for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set PYVER=%%v
-for /f "tokens=2 delims=." %%m in ("%PYVER%") do set PYMINOR=%%m
+set VPIP=venv\Scripts\pip.exe
 
-echo Python %PYVER% found. Installing core dependencies...
+echo Upgrading pip...
+"%VPIP%" install --upgrade pip
+
+REM ── 3. Install core dependencies ────────────────────────────
 echo.
-
-python -m pip install --upgrade pip
-python -m pip install PyQt5 edge-tts pydub librosa soundfile numpy scipy langdetect mutagen
-
-echo.
-
-REM Chatterbox TTS (voice cloning) requires Python 3.10-3.11.
-REM numpy 1.24-1.25 (required by chatterbox) has no pre-built wheels for Python 3.12+,
-REM so we skip the install entirely rather than letting pip fail with a long traceback.
-if %PYMINOR% LSS 12 (
-    echo Installing Chatterbox TTS (voice cloning^)...
-    echo NOTE: ~400 MB model is downloaded from HuggingFace on first use.
-    echo.
-    python -m pip install chatterbox-tts
-    if errorlevel 1 (
-        echo.
-        echo ============================================================
-        echo  WARNING: chatterbox-tts failed to install.
-        echo  Voice cloning will NOT be available.
-        echo.
-        echo  Try running manually:
-        echo    pip install chatterbox-tts
-        echo.
-        echo  The app will still work with 400+ edge-tts neural voices.
-        echo ============================================================
-        echo.
-        pause
-    )
-) else (
-    echo ============================================================
-    echo  NOTE: Chatterbox TTS voice cloning requires Python 3.10-3.11.
-    echo  You are running Python %PYVER%.
-    echo.
-    echo  chatterbox-tts is SKIPPED ^(it cannot install on Python 3.12+^).
-    echo.
-    echo  To enable voice cloning, install Python 3.11:
-    echo    https://www.python.org/downloads/release/python-3119/
-    echo  Then create a virtual environment and run:
-    echo    py -3.11 -m venv venv311
-    echo    venv311\Scripts\activate
-    echo    pip install PyQt5 edge-tts pydub librosa soundfile numpy scipy langdetect mutagen
-    echo    pip install chatterbox-tts
-    echo    python app.py
-    echo.
-    echo  The app works NOW with 400+ Microsoft Edge TTS neural voices.
-    echo ============================================================
-    echo.
+echo Installing core dependencies...
+"%VPIP%" install PyQt5 edge-tts pydub librosa soundfile numpy scipy langdetect mutagen
+if errorlevel 1 (
+    echo ERROR: Core dependency install failed. Check your internet connection.
+    pause
+    exit /b 1
 )
 
-REM Coqui TTS (XTTS v2 voice cloning) only supports Python 3.9-3.11.
-if %PYMINOR% LSS 12 (
-    echo Installing TTS (Coqui XTTS v2^) for voice cloning...
-    echo NOTE: The model (~2 GB) is downloaded on first use.
+REM ── 4. Install voice-cloning library (if compatible Python) ─
+if %CLONING%==1 (
     echo.
-    python -m pip install TTS
-) else (
-    echo NOTE: Coqui TTS (XTTS v2^) also requires Python 3.9-3.11 — skipped on %PYVER%.
+    echo Installing Chatterbox TTS for voice cloning...
+    echo NOTE: A ~400 MB model is downloaded from HuggingFace on first use.
+    "%VPIP%" install chatterbox-tts
+    if errorlevel 1 (
+        echo.
+        echo WARNING: chatterbox-tts failed to install.
+        echo Voice cloning will not be available, but the app still works.
+        echo.
+    ) else (
+        echo Chatterbox TTS installed successfully.
+    )
 )
 
 echo.
 echo ============================================================
-echo  Setup complete! Run "run.bat" to start EchoPilot.
+echo  Setup complete!  Run run.bat to start EchoPilot.
 echo ============================================================
 pause
