@@ -702,3 +702,103 @@ class TestResolveLangCode(unittest.TestCase):
     def test_empty_profile_and_combo_detects_english(self):
         code = self._resolve("", "All", "The quick brown fox jumps over the lazy dog")
         self.assertEqual(code, "en")
+
+
+# ── Chatterbox English-only gate ──────────────────────────────────────────────
+
+class TestChatterboxEnglishOnly(unittest.TestCase):
+    """Chatterbox must be bypassed for non-English languages."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _wav(self, name: str, ms: int = 2000) -> str:
+        p = os.path.join(self.tmp_dir, name)
+        return _make_wav(p, ms)
+
+    def _engine_with_mocks(self, cb_side_effect=None, xtts_side_effect=None,
+                            edge_side_effect=None):
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
+        engine._xtts = None
+        engine._last_backend = "edge-tts"
+        engine._last_clone_errors = []
+        engine._generate_chatterbox = MagicMock(side_effect=cb_side_effect)
+        engine._generate_xtts = MagicMock(side_effect=xtts_side_effect)
+        engine._generate_edge = MagicMock(side_effect=(
+            edge_side_effect or (lambda t, v, p: _make_wav(p, 500))
+        ))
+        return engine
+
+    def test_chatterbox_called_for_english(self):
+        """Chatterbox IS used when language='en' and ref audio exists."""
+        ref = self._wav("ref_en.wav")
+        engine = self._engine_with_mocks(
+            cb_side_effect=lambda t, r, p: _make_wav(p, 500),
+        )
+        out_dir = os.path.join(self.tmp_dir, "out_en")
+        os.makedirs(out_dir)
+        with patch("tts_engine.OUTPUT_DIR", out_dir):
+            engine.generate("Hello world", "en-US-AriaNeural",
+                            language="en", reference_audio=ref)
+        engine._generate_chatterbox.assert_called_once()
+        engine._generate_xtts.assert_not_called()
+
+    def test_chatterbox_skipped_for_french(self):
+        """Chatterbox must NOT be called when language='fr'."""
+        ref = self._wav("ref_fr.wav")
+        engine = self._engine_with_mocks(
+            xtts_side_effect=lambda t, r, l, p: _make_wav(p, 500),
+        )
+        out_dir = os.path.join(self.tmp_dir, "out_fr")
+        os.makedirs(out_dir)
+        with patch("tts_engine.OUTPUT_DIR", out_dir):
+            engine.generate("Bonjour le monde", "fr-FR-DeniseNeural",
+                            language="fr", reference_audio=ref)
+        engine._generate_chatterbox.assert_not_called()
+        engine._generate_xtts.assert_called_once()
+
+    def test_chatterbox_skipped_for_spanish(self):
+        """Chatterbox must NOT be called when language='es'."""
+        ref = self._wav("ref_es.wav")
+        engine = self._engine_with_mocks(
+            xtts_side_effect=lambda t, r, l, p: _make_wav(p, 500),
+        )
+        out_dir = os.path.join(self.tmp_dir, "out_es")
+        os.makedirs(out_dir)
+        with patch("tts_engine.OUTPUT_DIR", out_dir):
+            engine.generate("Hola mundo", "es-ES-ElviraNeural",
+                            language="es", reference_audio=ref)
+        engine._generate_chatterbox.assert_not_called()
+        engine._generate_xtts.assert_called_once()
+
+    def test_chatterbox_skipped_for_chinese(self):
+        """Chatterbox must NOT be called when language='zh-cn'."""
+        ref = self._wav("ref_zh.wav")
+        engine = self._engine_with_mocks(
+            xtts_side_effect=lambda t, r, l, p: _make_wav(p, 500),
+        )
+        out_dir = os.path.join(self.tmp_dir, "out_zh")
+        os.makedirs(out_dir)
+        with patch("tts_engine.OUTPUT_DIR", out_dir):
+            engine.generate("你好世界", "zh-CN-XiaoxiaoNeural",
+                            language="zh-cn", reference_audio=ref)
+        engine._generate_chatterbox.assert_not_called()
+        engine._generate_xtts.assert_called_once()
+
+    def test_chatterbox_skipped_for_en_us_locale(self):
+        """language='en-US' must still trigger Chatterbox (strip to 'en')."""
+        ref = self._wav("ref_en_us.wav")
+        engine = self._engine_with_mocks(
+            cb_side_effect=lambda t, r, p: _make_wav(p, 500),
+        )
+        out_dir = os.path.join(self.tmp_dir, "out_en_us")
+        os.makedirs(out_dir)
+        with patch("tts_engine.OUTPUT_DIR", out_dir):
+            engine.generate("Hello world", "en-US-AriaNeural",
+                            language="en-US", reference_audio=ref)
+        engine._generate_chatterbox.assert_called_once()
+        engine._generate_xtts.assert_not_called()

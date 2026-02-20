@@ -42,10 +42,11 @@ class TTSEngine:
 
         When *reference_audio* is a valid file path, voice cloning is attempted:
 
-        1. **ChatterboxTTS** — zero-shot cloning, Python 3.10–3.11 only (numpy
-           1.24–1.25 has no pre-built wheels for Python 3.12+).
-        2. **Coqui XTTS v2** — zero-shot cloning, Python 3.9–3.11 only,
-           ~2 GB model.  Used when ChatterboxTTS is unavailable.
+        1. **ChatterboxTTS** — zero-shot cloning, **English only**, Python 3.10–3.11
+           (numpy 1.24–1.25 has no pre-built wheels for Python 3.12+).
+           Skipped automatically for non-English languages.
+        2. **Coqui XTTS v2** — zero-shot cloning, multilingual (16 languages),
+           Python 3.9–3.11 only, ~2 GB model.
         3. **edge-tts** — neural TTS without cloning (fallback).
         4. **pyttsx3** — offline system TTS (last resort).
 
@@ -56,7 +57,7 @@ class TTSEngine:
         :param tone:            One of TONES; applies speed/volume post-processing.
         :param mood:            1–10 scale; 5 is neutral (no extra effect).
         :param reference_audio: Path to a WAV/MP3 reference recording (≥ 5 s recommended).
-        :param language:        2-letter BCP-47 code for XTTS (e.g. ``'en'``, ``'fr'``).
+        :param language:        2-letter BCP-47 code (e.g. ``'en'``, ``'fr'``).
         :returns: Path to the generated WAV file.
         """
         if output_path is None:
@@ -65,8 +66,13 @@ class TTSEngine:
 
         self._last_clone_errors = []
 
-        # 1. Try Chatterbox voice cloning (Python 3.10–3.11; numpy wheel constraint blocks 3.12+)
-        if reference_audio and os.path.isfile(reference_audio):
+        # Normalise language to a 2-letter code for comparisons below
+        lang_2 = (language or "en").lower().split("-")[0]
+
+        # 1. Try Chatterbox voice cloning — English only (PerthNet architecture,
+        #    trained on English corpus only; non-English text produces wrong language).
+        #    Skipped automatically when lang_2 != "en".
+        if reference_audio and os.path.isfile(reference_audio) and lang_2 == "en":
             try:
                 self._generate_chatterbox(text, reference_audio, output_path)
                 self._last_backend = "chatterbox"
@@ -78,10 +84,10 @@ class TTSEngine:
             except Exception as exc:
                 self._last_clone_errors.append(f"ChatterboxTTS error: {exc}")
 
-        # 2. Try Coqui XTTS v2 (Python 3.9–3.11 only)
+        # 2. Try Coqui XTTS v2 — multilingual (Python 3.9–3.11 only)
         if reference_audio and os.path.isfile(reference_audio):
             try:
-                self._generate_xtts(text, reference_audio, language, output_path)
+                self._generate_xtts(text, reference_audio, lang_2, output_path)
                 self._last_backend = "xtts"
                 if tone != "Normal" or mood != 5:
                     self._apply_tone_mood(output_path, tone, mood)
@@ -206,6 +212,10 @@ class TTSEngine:
 
     def _generate_chatterbox(self, text: str, reference_audio: str, output_path: str):
         """Clone the voice in *reference_audio* and synthesise *text* via Chatterbox.
+
+        **English only** — PerthNet (the underlying architecture) was trained on an
+        English corpus and cannot produce correct speech in other languages.
+        The caller (``generate``) skips this backend when ``language != "en"``.
 
         ChatterboxTTS supports Python 3.10–3.11.  On Python 3.12+ the required
         numpy 1.24–1.25 wheels are unavailable, so this path raises ImportError
