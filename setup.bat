@@ -140,13 +140,16 @@ if %CLONING%==1 (
     echo.
     echo Installing Coqui XTTS v2 ^(multilingual voice cloning: pt-BR, fr, es, zh, ...^)...
     echo NOTE: A ~2 GB model is downloaded from HuggingFace on first use.
-    "%VPIP%" install TTS
+    REM Use the maintained coqui-tts fork (supports PyTorch 2.6+, Python 3.11).
+    REM Uninstall the abandoned 'TTS' package first to avoid import conflicts.
+    "%VPIP%" uninstall TTS -y >nul 2>&1
+    "%VPIP%" install coqui-tts
     if errorlevel 1 (
-        echo WARNING: Coqui TTS failed to install.
+        echo WARNING: coqui-tts failed to install.
         echo Multilingual cloning ^(pt-BR, fr, es, etc.^) will not be available.
         echo English cloning via Chatterbox will still work if it installed above.
     ) else (
-        echo Coqui XTTS v2 installed successfully.
+        echo Coqui XTTS v2 ^(coqui-tts^) installed successfully.
     )
 )
 

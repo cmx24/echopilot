@@ -261,10 +261,18 @@ class TTSEngine:
         """Lazy-load and cache the Coqui XTTS v2 model.
 
         Downloads ~2 GB on first use (stored in the user's TTS model cache).
-        Raises ``ImportError`` if the ``TTS`` package is not installed.
+        Raises ``ImportError`` if the ``TTS``/``coqui-tts`` package is not installed.
 
         ``COQUI_TOS_AGREED=1`` is set automatically so the model loads
         without an interactive Terms-of-Service prompt.
+
+        PyTorch 2.6 changed ``torch.load`` to default ``weights_only=True``.
+        XTTS v2 checkpoints embed custom Python classes that must be explicitly
+        allowlisted via ``torch.serialization.add_safe_globals`` before loading.
+        We register all four XTTS config/model classes that appear in the checkpoint.
+        On older PyTorch (<2.6) ``add_safe_globals`` may not exist — the try/except
+        handles that gracefully (the attribute guard is also a safety net for the
+        call itself so the TypeError from a bad arg list never propagates).
         """
         if self._xtts is None:
             import torch  # noqa: PLC0415  – needed to detect CUDA availability
@@ -272,6 +280,21 @@ class TTSEngine:
             # Accept XTTS v2 Terms of Service non-interactively.
             # Without this the library raises TosAgreementError on first load.
             os.environ["COQUI_TOS_AGREED"] = "1"
+
+            # PyTorch 2.6+ fix: allowlist XTTS custom classes for safe unpickling.
+            # Without this, torch.load raises WeightsUnpickler error for XttsConfig
+            # and related classes.  Guarded so it's a no-op on PyTorch < 2.6.
+            try:
+                from TTS.tts.configs.xtts_config import XttsConfig        # noqa: PLC0415
+                from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs  # noqa: PLC0415
+                from TTS.config import BaseDatasetConfig                    # noqa: PLC0415
+                if hasattr(torch.serialization, "add_safe_globals"):
+                    torch.serialization.add_safe_globals(
+                        [XttsConfig, XttsAudioConfig, XttsArgs, BaseDatasetConfig]
+                    )
+            except (ImportError, AttributeError, TypeError):
+                pass  # Older torch or partial TTS install — let TTS handle it
+
             gpu = torch.cuda.is_available()
             self._xtts = CoquiTTS(
                 "tts_models/multilingual/multi-dataset/xtts_v2",

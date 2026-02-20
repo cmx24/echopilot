@@ -872,6 +872,72 @@ class TestXTTSTosAndGpu(unittest.TestCase):
 
                 self.assertEqual(captured.get("gpu"), expected_gpu)
 
+    def test_add_safe_globals_called_for_pytorch26(self):
+        """_get_xtts must call torch.serialization.add_safe_globals with all 4 XTTS classes."""
+        import types
+
+        captured_globals: list = []
+
+        # Build a fake torch module that records add_safe_globals calls
+        fake_torch = MagicMock()
+        fake_torch.cuda.is_available.return_value = False
+        fake_serialization = MagicMock()
+        fake_serialization.add_safe_globals = MagicMock(
+            side_effect=lambda classes: captured_globals.extend(classes)
+        )
+        fake_torch.serialization = fake_serialization
+
+        # Fake TTS.api
+        captured_tts: dict = {}
+        class FakeTTS:
+            def __init__(self, model_name, gpu=None):
+                captured_tts["called"] = True
+        fake_api = MagicMock()
+        fake_api.TTS = FakeTTS
+
+        # Fake XTTS config classes
+        FakeXttsConfig = type("XttsConfig", (), {})
+        FakeXttsAudioConfig = type("XttsAudioConfig", (), {})
+        FakeXttsArgs = type("XttsArgs", (), {})
+        FakeBaseDatasetConfig = type("BaseDatasetConfig", (), {})
+
+        fake_xtts_config_mod = MagicMock()
+        fake_xtts_config_mod.XttsConfig = FakeXttsConfig
+        fake_xtts_model_mod = MagicMock()
+        fake_xtts_model_mod.XttsAudioConfig = FakeXttsAudioConfig
+        fake_xtts_model_mod.XttsArgs = FakeXttsArgs
+        fake_tts_config_mod = MagicMock()
+        fake_tts_config_mod.BaseDatasetConfig = FakeBaseDatasetConfig
+
+        fake_tts_module = types.ModuleType("TTS")
+        fake_tts_module.api = fake_api
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._xtts = None
+
+        with patch.dict("sys.modules", {
+            "torch": fake_torch,
+            "TTS": fake_tts_module,
+            "TTS.api": fake_api,
+            "TTS.tts": MagicMock(),
+            "TTS.tts.configs": MagicMock(),
+            "TTS.tts.configs.xtts_config": fake_xtts_config_mod,
+            "TTS.tts.models": MagicMock(),
+            "TTS.tts.models.xtts": fake_xtts_model_mod,
+            "TTS.config": fake_tts_config_mod,
+        }):
+            engine._get_xtts()
+
+        # add_safe_globals must have been called with all 4 classes
+        self.assertIn(FakeXttsConfig, captured_globals,
+                      "XttsConfig must be in add_safe_globals call")
+        self.assertIn(FakeXttsAudioConfig, captured_globals,
+                      "XttsAudioConfig must be in add_safe_globals call")
+        self.assertIn(FakeXttsArgs, captured_globals,
+                      "XttsArgs must be in add_safe_globals call")
+        self.assertIn(FakeBaseDatasetConfig, captured_globals,
+                      "BaseDatasetConfig must be in add_safe_globals call")
+
 
 # ── pt-BR / XTTS language routing ─────────────────────────────────────────────
 

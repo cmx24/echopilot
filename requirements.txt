@@ -6,7 +6,8 @@ edge-tts          # primary: 400+ neural voices via Microsoft Edge TTS
 pyttsx3           # offline fallback using system TTS engine
 # Voice cloning backends — installed automatically by setup.bat on Python 3.11:
 #   chatterbox-tts  → English only, Python 3.10–3.11 (numpy 1.24-1.25; no wheels for 3.12+)
-#   TTS             → Coqui XTTS v2, multilingual (pt-BR, fr, es, zh, etc.), Python 3.9–3.11
+#   coqui-tts       → Coqui XTTS v2, multilingual (pt-BR, fr, es, zh, etc.), Python 3.11+
+#                     Maintained fork of coqui-ai/TTS; supports PyTorch 2.6+
 #                     setup.bat installs both; ~2 GB model downloaded on first use
 
 # Audio processing
