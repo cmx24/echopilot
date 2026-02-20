@@ -623,3 +623,82 @@ class TestTTSEngineAudioOps(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+# ── Language resolution logic ─────────────────────────────────────────────────
+
+class TestResolveLangCode(unittest.TestCase):
+    """Tests for the _resolve_lang_code priority chain.
+
+    _resolve_lang_code is a widget method; we test its logic here by exercising
+    VoiceManager.get_locale_for_language (which is the core lookup it uses) and
+    verifying the expected 2-letter codes are returned.
+
+    Steps:
+      1. profile_lang (display name) → get_locale_for_language
+      2. combo_lang (display name) → get_locale_for_language
+      3. langdetect(text) → returns a BCP-47 code directly (NOT through get_locale_for_language)
+      4. fallback "en"
+    """
+
+    def _resolve(self, profile_lang: str, combo_lang: str, text: str) -> str:
+        """Pure-Python reimplementation of app._resolve_lang_code for unit testing.
+
+        We cannot instantiate EchoPilot (a QMainWindow) without a QApplication,
+        so we mirror the production priority logic here.  If the production code
+        changes, this helper must be updated in tandem — both follow the same
+        docstring contract:
+          1. profile_lang (display name) → get_locale_for_language
+          2. combo_lang (display name)   → get_locale_for_language
+          3. langdetect(text)            → BCP-47 code used directly
+          4. fallback "en"
+        """
+        from voice_manager import VoiceManager
+
+        # Steps 1 & 2 — display names
+        display: str | None = None
+        if profile_lang and profile_lang not in ("", "Unknown", "All"):
+            display = profile_lang
+        if display is None and combo_lang not in ("", "All"):
+            display = combo_lang
+
+        if display is not None:
+            locale = VoiceManager.get_locale_for_language(display).lower()
+            if locale.startswith("zh"):
+                return "zh-cn"
+            return locale.split("-")[0] or "en"
+
+        # Step 3 — langdetect returns a code directly (e.g. "fr")
+        try:
+            from langdetect import detect as _ld, LangDetectException
+            code = (_ld(text[:500]) or "en").lower()
+        except (ImportError, LangDetectException):
+            code = "en"
+        if code.startswith("zh"):
+            return "zh-cn"
+        return code.split("-")[0] or "en"
+
+    def test_profile_lang_used_when_set(self):
+        code = self._resolve("French", "All", "hello world")
+        self.assertEqual(code, "fr")
+
+    def test_profile_lang_empty_falls_to_combo(self):
+        code = self._resolve("", "German", "hello world")
+        self.assertEqual(code, "de")
+
+    def test_profile_lang_unknown_falls_to_combo(self):
+        code = self._resolve("Unknown", "Spanish", "hello")
+        self.assertEqual(code, "es")
+
+    def test_combo_all_falls_to_detect(self):
+        # "Bonjour tout le monde" is French — langdetect should detect it
+        code = self._resolve("", "All", "Bonjour tout le monde, comment allez-vous?")
+        self.assertEqual(code, "fr")
+
+    def test_chinese_display_name_returns_zh_cn(self):
+        code = self._resolve("Chinese", "All", "hello")
+        self.assertEqual(code, "zh-cn")
+
+    def test_empty_profile_and_combo_detects_english(self):
+        code = self._resolve("", "All", "The quick brown fox jumps over the lazy dog")
+        self.assertEqual(code, "en")

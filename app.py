@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 
-from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt5.QtCore import Qt, QSettings, QThread, QUrl, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -167,6 +167,9 @@ class EchoPilot(QMainWindow):
         tabs.addTab(self._build_edit_tab(),       "✂   Edit & Save")
         self.setStyleSheet(self._STYLE)
 
+        # Restore settings from previous session
+        self._restore_settings()
+
         # Warn at startup if no voice cloning backend is available
         if self._cloning_backend is None:
             py = sys.version_info
@@ -181,6 +184,78 @@ class EchoPilot(QMainWindow):
                     "⚠ Voice cloning package not installed — re-run setup.bat to enable it.",
                     0,
                 )
+
+    # ── Settings persistence ──────────────────────────────────────────────────
+
+    _SETTINGS_ORG  = "EchoPilot"
+    _SETTINGS_APP  = "TTS Studio"
+
+    def _save_settings(self):
+        """Persist Generate-tab state so it survives app restarts."""
+        try:
+            s = QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
+            s.setValue("gen/text",      self.gen_text.toPlainText())
+            s.setValue("gen/lang",      self.gen_lang_combo.currentText())
+            s.setValue("gen/gender",    self.gen_gender_combo.currentText())
+            s.setValue("gen/voice",     self.gen_voice_combo.currentText())
+            s.setValue("gen/tone",      self.gen_tone_combo.currentText())
+            s.setValue("gen/mood",      self.gen_mood_slider.value())
+            s.setValue("app/font_size", self._font_size)
+            s.sync()
+        except Exception:  # noqa: BLE001 — best-effort; never crash on save
+            pass
+
+    def _restore_settings(self):
+        """Reload persisted Generate-tab state after widgets are built."""
+        s = QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
+
+        text = s.value("gen/text", "")
+        if text:
+            self.gen_text.setPlainText(text)
+
+        # Language + Gender — must come before voice repopulation
+        for combo, key in (
+            (self.gen_lang_combo,   "gen/lang"),
+            (self.gen_gender_combo, "gen/gender"),
+        ):
+            val = s.value(key, "")
+            if val:
+                idx = combo.findText(val)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+
+        # Repopulate voice list for restored language/gender, then restore voice
+        self._populate_gen_voice_combo()
+        voice_text = s.value("gen/voice", "")
+        if voice_text:
+            idx = self.gen_voice_combo.findText(voice_text)
+            if idx >= 0:
+                self.gen_voice_combo.setCurrentIndex(idx)
+
+        tone = s.value("gen/tone", "")
+        if tone:
+            idx = self.gen_tone_combo.findText(tone)
+            if idx >= 0:
+                self.gen_tone_combo.setCurrentIndex(idx)
+
+        mood = s.value("gen/mood", None)
+        if mood is not None:
+            try:
+                self.gen_mood_slider.setValue(int(mood))
+            except (TypeError, ValueError):
+                pass
+
+        font = s.value("app/font_size", None)
+        if font is not None:
+            try:
+                self._font_size = max(9, min(24, int(font)))
+                self._apply_font_size()
+            except (TypeError, ValueError):
+                pass
+
+    def closeEvent(self, event):
+        self._save_settings()
+        super().closeEvent(event)
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -399,6 +474,45 @@ class EchoPilot(QMainWindow):
             self.gen_voice_combo.addItem(f"{tag} {v['name']}", v)
         self.gen_voice_combo.blockSignals(False)
 
+    def _resolve_lang_code(self, profile_language: str, text: str) -> str:
+        """Return a 2-letter language code for cloning backends.
+
+        Priority:
+        1. Language saved in the voice profile (if set and not placeholder)
+        2. Language currently selected in the Generate tab filter (if not "All")
+        3. Auto-detect from the input text via langdetect (returns a code directly)
+        4. Hard fallback: "en"
+
+        ``profile_language`` and the combo value are display names (e.g. "French").
+        langdetect returns 2-letter codes (e.g. "fr") — those are used directly
+        without going through ``get_locale_for_language``.
+        """
+        # Steps 1 and 2 — display names (e.g. "French")
+        display_name: str | None = None
+        if profile_language and profile_language not in ("", "Unknown", "All"):
+            display_name = profile_language
+        if display_name is None:
+            combo_lang = self.gen_lang_combo.currentText()
+            if combo_lang not in ("", "All"):
+                display_name = combo_lang
+
+        if display_name is not None:
+            locale = self.vm.get_locale_for_language(display_name).lower()
+            if locale.startswith("zh"):
+                return "zh-cn"
+            return locale.split("-")[0] or "en"
+
+        # Step 3 — langdetect returns a BCP-47 code like "fr" directly
+        try:
+            from langdetect import detect as _ld, LangDetectException  # noqa: PLC0415
+            code = (_ld(text[:500]) or "en").lower()
+        except (ImportError, LangDetectException):
+            code = "en"
+
+        if code.startswith("zh"):
+            return "zh-cn"
+        return code.split("-")[0] or "en"
+
     def _on_generate(self):
         text = self.gen_text.toPlainText().strip()
         if not text:
@@ -423,9 +537,8 @@ class EchoPilot(QMainWindow):
 
             ref = voice_data.get("reference_audio", "")
             if ref and os.path.isfile(ref):
-                # Derive the 2-letter language code for XTTS v2
-                locale = self.vm.get_locale_for_language(language).lower()
-                lang_code = "zh-cn" if locale.startswith("zh") else locale.split("-")[0]
+                # Derive the 2-letter language code via priority fallback
+                lang_code = self._resolve_lang_code(language, text)
                 params["reference_audio"] = ref
                 params["language"] = lang_code
                 self.gen_status.setText(
