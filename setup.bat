@@ -118,7 +118,7 @@ echo Upgrading pip...
 REM ── 3. Install core dependencies ────────────────────────────
 echo.
 echo Installing core dependencies...
-"%VPIP%" install PyQt5 edge-tts pydub librosa soundfile numpy scipy langdetect mutagen
+"%VPIP%" install PyQt5 edge-tts pydub pyttsx3 librosa soundfile numpy scipy langdetect mutagen
 if errorlevel 1 (
     echo ERROR: Core dependency install failed. Check your internet connection.
     pause

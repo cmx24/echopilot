@@ -718,7 +718,7 @@ class EchoPilot(QMainWindow):
         meta_row.addWidget(QLabel("Language:"))
         self.clone_lang_combo = QComboBox()
         self.clone_lang_combo.addItems(
-            [l for l in self.vm.get_all_languages() if l != "All"]
+            [lang for lang in self.vm.get_all_languages() if lang != "All"]
         )
         meta_row.addWidget(self.clone_lang_combo)
         meta_row.addStretch()

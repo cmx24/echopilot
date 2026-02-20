@@ -789,7 +789,7 @@ class TestChatterboxEnglishOnly(unittest.TestCase):
         engine._generate_chatterbox.assert_not_called()
         engine._generate_xtts.assert_called_once()
 
-    def test_chatterbox_skipped_for_en_us_locale(self):
+    def test_chatterbox_used_for_en_us_locale(self):
         """language='en-US' must still trigger Chatterbox (strip to 'en')."""
         ref = self._wav("ref_en_us.wav")
         engine = self._engine_with_mocks(
