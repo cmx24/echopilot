@@ -17,11 +17,18 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Python found. Installing dependencies...
+echo Python found. Installing core dependencies...
 echo.
 
 python -m pip install --upgrade pip
 python -m pip install PyQt5 edge-tts pydub librosa soundfile numpy scipy langdetect mutagen
+
+echo.
+echo Installing TTS (Coqui XTTS v2) for voice cloning...
+echo NOTE: This will download ~2 GB on first USE of the clone feature.
+echo       You can skip this step if you only want standard TTS voices.
+echo.
+python -m pip install TTS
 
 echo.
 echo ============================================================

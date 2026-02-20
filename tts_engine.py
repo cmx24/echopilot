@@ -23,28 +23,50 @@ _TONE_PARAMS = {
 class TTSEngine:
     def __init__(self):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
+        self._xtts = None  # Coqui XTTS v2 instance, loaded on demand
 
     # ── Public API ───────────────────────────────────────────────────────────
 
     def generate(self, text: str, voice_short_name: str,
                  tone: str = "Normal", mood: int = 5,
-                 output_path: str = None) -> str:
+                 output_path: str = None,
+                 reference_audio: str = None,
+                 language: str = "en") -> str:
         """
         Synthesise *text* using *voice_short_name* (edge-tts voice ID).
 
-        Falls back to pyttsx3 when edge-tts is unavailable.
+        When *reference_audio* is a valid file path, Coqui XTTS v2 is used
+        for zero-shot voice cloning so the output sounds like the speaker in
+        the recording.  Falls back to edge-tts when the ``TTS`` package is not
+        installed, and to pyttsx3 when edge-tts is unavailable.
 
-        :param tone:  One of TONES; applies speed/volume post-processing.
-        :param mood:  1–10 scale; 5 is neutral (no extra effect).
+        :param tone:            One of TONES; applies speed/volume post-processing.
+        :param mood:            1–10 scale; 5 is neutral (no extra effect).
+        :param reference_audio: Path to a WAV/MP3 reference recording (≥ 3 s).
+        :param language:        2-letter BCP-47 code for XTTS (e.g. ``'en'``, ``'fr'``).
         :returns: Path to the generated WAV file.
         """
         if output_path is None:
             fd, output_path = tempfile.mkstemp(suffix=".wav", dir=OUTPUT_DIR)
             os.close(fd)
 
+        # 1. Try XTTS v2 voice cloning when a reference recording is available
+        if reference_audio and os.path.isfile(reference_audio):
+            try:
+                self._generate_xtts(text, reference_audio, language, output_path)
+                if tone != "Normal" or mood != 5:
+                    self._apply_tone_mood(output_path, tone, mood)
+                return output_path
+            except ImportError:
+                pass  # TTS package not installed → fall through to edge-tts
+            except Exception:
+                pass  # XTTS inference error → fall through to edge-tts
+
+        # 2. edge-tts (primary neural voices)
         try:
             self._generate_edge(text, voice_short_name, output_path)
         except Exception as edge_err:
+            # 3. pyttsx3 offline fallback
             try:
                 self._generate_pyttsx3(text, output_path)
             except Exception as tts_err:
@@ -96,6 +118,47 @@ class TTSEngine:
         return audio_path
 
     # ── Backends ─────────────────────────────────────────────────────────────
+
+    # XTlanguage codes accepted by XTTS v2
+    _XTTS_LANGUAGES = {
+        "en", "es", "fr", "de", "it", "pt", "pl", "tr",
+        "ru", "nl", "cs", "ar", "zh-cn", "ja", "hu", "ko",
+    }
+
+    def _get_xtts(self):
+        """Lazy-load and cache the Coqui XTTS v2 model.
+
+        Downloads ~2 GB on first use (stored in the user's TTS model cache).
+        Raises ``ImportError`` if the ``TTS`` package is not installed.
+        """
+        if self._xtts is None:
+            from TTS.api import TTS as CoquiTTS  # noqa: PLC0415
+            self._xtts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2")
+        return self._xtts
+
+    def _generate_xtts(self, text: str, reference_audio: str,
+                       language: str, output_path: str):
+        """Clone the voice in *reference_audio* and synthesise *text*.
+
+        Uses Coqui XTTS v2 for zero-shot cross-lingual voice cloning.
+        The reference recording should be 3–30 s of clean speech.
+
+        :raises ImportError: if the ``TTS`` package is not installed.
+        """
+        lang = language.lower()
+        # Normalise Chinese variants to XTTS's expected code
+        if lang.startswith("zh"):
+            lang = "zh-cn"
+        if lang not in self._XTTS_LANGUAGES:
+            lang = "en"  # safe fallback
+
+        tts = self._get_xtts()
+        tts.tts_to_file(
+            text=text,
+            speaker_wav=reference_audio,
+            language=lang,
+            file_path=output_path,
+        )
 
     def _generate_edge(self, text: str, voice: str, output_path: str):
         """Synthesise with edge-tts and write a WAV to *output_path*."""

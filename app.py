@@ -391,31 +391,40 @@ class EchoPilot(QMainWindow):
             QMessageBox.warning(self, "No Voice", "Please select a voice.")
             return
 
+        params = {
+            "text": text,
+            "tone": self.gen_tone_combo.currentText(),
+            "mood": self.gen_mood_slider.value(),
+        }
+
         if voice_data.get("type") == "custom":
             language = voice_data.get("language", "")
             gender = voice_data.get("gender", "")
             short_name = self._best_builtin_voice(language, gender)
+            params["voice_short_name"] = short_name
+
             ref = voice_data.get("reference_audio", "")
-            hint = (
-                f"ℹ Using closest match: {short_name}"
-                if ref and os.path.isfile(ref) else
-                f"ℹ No reference audio — using {short_name}"
-            )
-            self.gen_status.setText(hint)
+            if ref and os.path.isfile(ref):
+                # Derive the 2-letter language code for XTTS v2
+                locale = self.vm.get_locale_for_language(language).lower()
+                lang_code = "zh-cn" if locale.startswith("zh") else locale.split("-")[0]
+                params["reference_audio"] = ref
+                params["language"] = lang_code
+                self.gen_status.setText(
+                    "⏳ Cloning voice (first run downloads ~2 GB model)…"
+                )
+            else:
+                self.gen_status.setText(f"ℹ No reference audio — using {short_name}")
         else:
-            short_name = voice_data.get("short_name", "en-US-AriaNeural")
+            params["voice_short_name"] = voice_data.get("short_name", "en-US-AriaNeural")
 
         self.gen_btn.setEnabled(False)
         self.gen_play_btn.setEnabled(False)
         self.gen_save_btn.setEnabled(False)
-        self.gen_status.setText("⏳ Generating…")
+        if "⏳" not in self.gen_status.text():
+            self.gen_status.setText("⏳ Generating…")
 
-        self._tts_worker = TTSWorker(self.engine, {
-            "text": text,
-            "voice_short_name": short_name,
-            "tone": self.gen_tone_combo.currentText(),
-            "mood": self.gen_mood_slider.value(),
-        })
+        self._tts_worker = TTSWorker(self.engine, params)
         self._tts_worker.finished.connect(self._on_generate_done)
         self._tts_worker.error.connect(self._on_generate_error)
         self._tts_worker.start()

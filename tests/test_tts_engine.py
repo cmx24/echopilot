@@ -236,6 +236,93 @@ class TestTTSEngineAudioOps(unittest.TestCase):
         self.assertEqual(result, out)
         self.assertTrue(os.path.isfile(out))
 
+    # ── XTTS routing ─────────────────────────────────────────────────────────
+
+    def test_generate_uses_xtts_when_reference_audio_provided(self):
+        """When reference_audio exists, _generate_xtts must be called."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_xtts"), exist_ok=True)
+        ref = self._wav("ref.wav", 3000)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._xtts = None
+        engine._generate_xtts = MagicMock(side_effect=lambda t, r, l, p: _make_wav(p, 500))
+        engine._generate_edge = MagicMock()  # must NOT be called
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_xtts")):
+            result = engine.generate("Hello", "en-US-AriaNeural", reference_audio=ref)
+
+        engine._generate_xtts.assert_called_once()
+        engine._generate_edge.assert_not_called()
+        self.assertTrue(os.path.isfile(result))
+
+    def test_generate_falls_back_to_edge_when_xtts_raises_import_error(self):
+        """ImportError from _generate_xtts → silently fall back to edge-tts."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_xfb"), exist_ok=True)
+        ref = self._wav("ref_fb.wav", 3000)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._xtts = None
+        engine._generate_xtts = MagicMock(side_effect=ImportError("TTS not installed"))
+        engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_xfb")):
+            result = engine.generate("Hello", "en-US-AriaNeural", reference_audio=ref)
+
+        engine._generate_edge.assert_called_once()
+        self.assertTrue(os.path.isfile(result))
+
+    def test_generate_falls_back_to_edge_when_xtts_inference_fails(self):
+        """Any exception from _generate_xtts → silently fall back to edge-tts."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_xerr"), exist_ok=True)
+        ref = self._wav("ref_err.wav", 3000)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._xtts = None
+        engine._generate_xtts = MagicMock(side_effect=RuntimeError("CUDA OOM"))
+        engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_xerr")):
+            result = engine.generate("Hello", "en-US-AriaNeural", reference_audio=ref)
+
+        engine._generate_edge.assert_called_once()
+        self.assertTrue(os.path.isfile(result))
+
+    def test_generate_skips_xtts_when_reference_audio_missing(self):
+        """If reference_audio path doesn't exist, edge-tts must be used directly."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_noref"), exist_ok=True)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._xtts = None
+        engine._generate_xtts = MagicMock()
+        engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_noref")):
+            engine.generate("Hello", "en-US-AriaNeural",
+                            reference_audio="/nonexistent/path.wav")
+
+        engine._generate_xtts.assert_not_called()
+        engine._generate_edge.assert_called_once()
+
+    def test_generate_passes_language_to_xtts(self):
+        """The *language* parameter must reach _generate_xtts unchanged."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_lang"), exist_ok=True)
+        ref = self._wav("ref_lang.wav", 3000)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._xtts = None
+        captured = {}
+        def fake_xtts(text, reference_audio, language, output_path):
+            captured["language"] = language
+            _make_wav(output_path, 500)
+        engine._generate_xtts = fake_xtts
+        engine._generate_edge = MagicMock()
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_lang")):
+            engine.generate("Bonjour", "fr-FR-DeniseNeural",
+                            reference_audio=ref, language="fr")
+
+        self.assertEqual(captured["language"], "fr")
+
 
 if __name__ == "__main__":
     unittest.main()
