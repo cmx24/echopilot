@@ -675,11 +675,26 @@ class EchoPilot(QMainWindow):
             warn_label.setWordWrap(True)
             rl.addWidget(warn_label)
         else:
-            ok_label = QLabel(
-                f"✔  Voice cloning ready ({self._cloning_backend}) — "
-                "model downloads ~400 MB on first use."
-            )
-            ok_label.setStyleSheet("color: #a6e3a1; font-size: 11px;")
+            xtts_ok = TTSEngine.multilingual_cloning_available()
+            if xtts_ok:
+                # Language sample list mirrors TTSEngine._XTTS_LANGUAGES subset
+                banner_text = (
+                    "✔  Voice cloning ready  ·  "
+                    "English (Chatterbox, ~400 MB on first use)  ·  "
+                    "Multilingual pt-BR / fr / es / zh / … (XTTS v2, ~2 GB on first use)"
+                )
+                banner_style = "color: #a6e3a1; font-size: 11px;"
+            else:
+                # Language sample list mirrors TTSEngine._XTTS_LANGUAGES subset
+                banner_text = (
+                    "✔  English cloning ready (Chatterbox, ~400 MB on first use)  ·  "
+                    "⚠ Multilingual cloning (pt-BR, fr, es…) unavailable — "
+                    "re-run setup.bat to install Coqui XTTS v2."
+                )
+                banner_style = "color: #f9e2af; font-size: 11px;"
+            ok_label = QLabel(banner_text)
+            ok_label.setStyleSheet(banner_style)
+            ok_label.setWordWrap(True)
             rl.addWidget(ok_label)
 
         detect_row = QHBoxLayout()

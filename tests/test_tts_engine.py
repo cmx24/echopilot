@@ -871,3 +871,107 @@ class TestXTTSTosAndGpu(unittest.TestCase):
                     engine._get_xtts()
 
                 self.assertEqual(captured.get("gpu"), expected_gpu)
+
+
+# ── pt-BR / XTTS language routing ─────────────────────────────────────────────
+
+class TestPtBrXttsRouting(unittest.TestCase):
+    """Guarantee that Portuguese (pt-BR) voice cloning routes correctly to XTTS."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _wav(self, name: str, duration_ms: int = 3000) -> str:
+        return _make_wav(os.path.join(self.tmp_dir, name), duration_ms)
+
+    def _engine(self) -> TTSEngine:
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
+        engine._xtts = None
+        engine._last_backend = "edge-tts"
+        engine._last_clone_errors = []
+        return engine
+
+    def test_pt_in_xtts_languages(self):
+        """'pt' must be in _XTTS_LANGUAGES — XTTS v2 supports Brazilian Portuguese."""
+        self.assertIn("pt", TTSEngine._XTTS_LANGUAGES)
+
+    def test_chatterbox_skipped_for_portuguese(self):
+        """Chatterbox must be SKIPPED for language='pt' (English-only engine)."""
+        os.makedirs(os.path.join(self.tmp_dir, "out_pt_cb"), exist_ok=True)
+        ref = self._wav("ref_pt.wav")
+        engine = self._engine()
+        engine._generate_chatterbox = MagicMock()
+        engine._generate_xtts = MagicMock(side_effect=lambda t, r, l, p: _make_wav(p, 500))
+        engine._generate_edge = MagicMock()
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "out_pt_cb")):
+            engine.generate("Olá", "pt-BR-AntonioNeural",
+                            reference_audio=ref, language="pt")
+
+        engine._generate_chatterbox.assert_not_called()
+        engine._generate_xtts.assert_called_once()
+
+    def test_xtts_called_with_pt_language_code(self):
+        """XTTS must receive language='pt' when the profile language is Portuguese."""
+        os.makedirs(os.path.join(self.tmp_dir, "out_pt_lang"), exist_ok=True)
+        ref = self._wav("ref_pt_lang.wav")
+        engine = self._engine()
+        engine._generate_chatterbox = MagicMock(side_effect=ImportError("no cb"))
+        captured: dict = {}
+
+        def fake_xtts(text, reference_audio, language, output_path):
+            captured["language"] = language
+            _make_wav(output_path, 500)
+
+        engine._generate_xtts = fake_xtts
+        engine._generate_edge = MagicMock()
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "out_pt_lang")):
+            engine.generate("Olá mundo", "pt-BR-AntonioNeural",
+                            reference_audio=ref, language="pt")
+
+        self.assertEqual(captured.get("language"), "pt",
+                         "XTTS must receive 'pt', not a locale like 'pt-br' or a display name")
+
+    def test_pt_br_locale_normalises_to_pt(self):
+        """language='pt-br' (locale form) must reach XTTS as 'pt' after normalisation."""
+        os.makedirs(os.path.join(self.tmp_dir, "out_ptbr_loc"), exist_ok=True)
+        ref = self._wav("ref_ptbr_loc.wav")
+        engine = self._engine()
+        engine._generate_chatterbox = MagicMock(side_effect=ImportError("no cb"))
+        captured: dict = {}
+
+        def fake_xtts(text, reference_audio, language, output_path):
+            captured["language"] = language
+            _make_wav(output_path, 500)
+
+        engine._generate_xtts = fake_xtts
+        engine._generate_edge = MagicMock()
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "out_ptbr_loc")):
+            # Simulate app passing 'pt-br' (locale form)
+            engine.generate("Olá mundo", "pt-BR-AntonioNeural",
+                            reference_audio=ref, language="pt-br")
+
+        self.assertEqual(captured.get("language"), "pt",
+                         "'pt-br' must be split to 'pt' before reaching _generate_xtts")
+
+    def test_generate_xtts_unsupported_language_raises_value_error(self):
+        """_generate_xtts must raise ValueError for languages not in _XTTS_LANGUAGES."""
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._xtts = MagicMock()  # avoid real model load
+        dummy_ref = self._wav("ref_xx.wav")
+        dummy_out = os.path.join(self.tmp_dir, "out_xx.wav")
+        with self.assertRaises(ValueError) as ctx:
+            engine._generate_xtts("test", dummy_ref, "xx", dummy_out)
+        self.assertIn("'xx'", str(ctx.exception))
+        self.assertIn("not supported", str(ctx.exception))
+
+    def test_multilingual_cloning_available_returns_bool(self):
+        """`multilingual_cloning_available()` must always return a plain bool."""
+        result = TTSEngine.multilingual_cloning_available()
+        self.assertIsInstance(result, bool)

@@ -161,6 +161,20 @@ class TTSEngine:
         return None
 
     @staticmethod
+    def multilingual_cloning_available() -> bool:
+        """Return True if Coqui XTTS v2 (multilingual cloning) is installed.
+
+        Probes the ``TTS`` package import without loading model weights.
+        XTTS v2 is required for non-English voice cloning (pt-BR, fr, es, zh…).
+        ChatterboxTTS (checked by :meth:`cloning_backend`) is English-only.
+        """
+        try:
+            import TTS  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    @staticmethod
     def cloning_install_instructions() -> str:
         """Return a user-facing string with install instructions for voice cloning."""
         import sys
@@ -240,6 +254,8 @@ class TTSEngine:
         "en", "es", "fr", "de", "it", "pt", "pl", "tr",
         "ru", "nl", "cs", "ar", "zh-cn", "ja", "hu", "ko",
     }
+    # Pre-sorted string for error messages — computed once, not on every error
+    _XTTS_LANGUAGES_STR: str = ""  # filled in below the class body
 
     def _get_xtts(self):
         """Lazy-load and cache the Coqui XTTS v2 model.
@@ -271,13 +287,18 @@ class TTSEngine:
         The reference recording should be 3–30 s of clean speech.
 
         :raises ImportError: if the ``TTS`` package is not installed.
+        :raises ValueError: if *language* is not in :attr:`_XTTS_LANGUAGES`.
         """
         lang = language.lower()
         # Normalise Chinese variants to XTTS's expected code
         if lang.startswith("zh"):
             lang = "zh-cn"
         if lang not in self._XTTS_LANGUAGES:
-            lang = "en"  # safe fallback
+            raise ValueError(
+                f"Language '{language}' is not supported by XTTS v2. "
+                f"Supported codes: {self._XTTS_LANGUAGES_STR}. "
+                "For unsupported languages, edge-tts neural voices are used."
+            )
 
         tts = self._get_xtts()
         tts.tts_to_file(
@@ -364,3 +385,6 @@ class TTSEngine:
                 "sample_width": audio.sample_width,
             },
         )
+
+# Fill the class-level language string after the class is fully defined
+TTSEngine._XTTS_LANGUAGES_STR = ", ".join(sorted(TTSEngine._XTTS_LANGUAGES))
