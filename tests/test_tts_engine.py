@@ -620,11 +620,6 @@ class TestTTSEngineAudioOps(unittest.TestCase):
         self.assertTrue(os.path.isfile(result))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-
 # ── Language resolution logic ─────────────────────────────────────────────────
 
 class TestResolveLangCode(unittest.TestCase):
@@ -1041,3 +1036,7 @@ class TestPtBrXttsRouting(unittest.TestCase):
         """`multilingual_cloning_available()` must always return a plain bool."""
         result = TTSEngine.multilingual_cloning_available()
         self.assertIsInstance(result, bool)
+
+
+if __name__ == "__main__":
+    unittest.main()
