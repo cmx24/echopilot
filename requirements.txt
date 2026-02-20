@@ -4,8 +4,9 @@ PyQt5
 # TTS backends
 edge-tts          # primary: 400+ neural voices via Microsoft Edge TTS
 pyttsx3           # offline fallback using system TTS engine
-TTS               # Coqui XTTS v2 — zero-shot voice cloning from reference audio
-                  # (~2 GB model download on first use; skip if not needed)
+# TTS            # Coqui XTTS v2 voice cloning — requires Python 3.9–3.11 only
+                  # Install manually on Python 3.9–3.11: pip install TTS
+                  # On Python 3.12+ this package is unavailable; edge-tts is used instead
 
 # Audio processing
 pydub             # manipulation, trim, speed, mp3/wav export
