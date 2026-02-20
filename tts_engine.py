@@ -1,5 +1,7 @@
 """TTS engine for EchoPilot — edge-tts primary, pyttsx3 offline fallback."""
 
+from __future__ import annotations
+
 import asyncio
 import os
 import tempfile
@@ -23,30 +25,87 @@ _TONE_PARAMS = {
 class TTSEngine:
     def __init__(self):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
+        self._xtts = None         # Coqui XTTS v2 instance, loaded on demand
+        self._chatterbox = None   # ChatterboxTTS instance, loaded on demand
+        self._last_backend: str = "edge-tts"    # updated after each generate()
+        self._last_clone_errors: list = []      # errors from failed clone attempts
 
     # ── Public API ───────────────────────────────────────────────────────────
 
     def generate(self, text: str, voice_short_name: str,
                  tone: str = "Normal", mood: int = 5,
-                 output_path: str = None) -> str:
+                 output_path: str = None,
+                 reference_audio: str = None,
+                 language: str = "en") -> str:
         """
         Synthesise *text* using *voice_short_name* (edge-tts voice ID).
 
-        Falls back to pyttsx3 when edge-tts is unavailable.
+        When *reference_audio* is a valid file path, voice cloning is attempted:
 
-        :param tone:  One of TONES; applies speed/volume post-processing.
-        :param mood:  1–10 scale; 5 is neutral (no extra effect).
+        1. **ChatterboxTTS** — zero-shot cloning, **English only**, Python 3.10–3.11
+           (numpy 1.24–1.25 has no pre-built wheels for Python 3.12+).
+           Skipped automatically for non-English languages.
+        2. **Coqui XTTS v2** — zero-shot cloning, multilingual (16 languages),
+           Python 3.9–3.11 only, ~2 GB model.
+        3. **edge-tts** — neural TTS without cloning (fallback).
+        4. **pyttsx3** — offline system TTS (last resort).
+
+        After generation ``self._last_backend`` names the backend that produced
+        the audio.  ``self._last_clone_errors`` lists any errors that caused
+        cloning to fall back, so the UI can surface them to the user.
+
+        :param tone:            One of TONES; applies speed/volume post-processing.
+        :param mood:            1–10 scale; 5 is neutral (no extra effect).
+        :param reference_audio: Path to a WAV/MP3 reference recording (≥ 5 s recommended).
+        :param language:        2-letter BCP-47 code (e.g. ``'en'``, ``'fr'``).
         :returns: Path to the generated WAV file.
         """
         if output_path is None:
             fd, output_path = tempfile.mkstemp(suffix=".wav", dir=OUTPUT_DIR)
             os.close(fd)
 
+        self._last_clone_errors = []
+
+        # Normalise language to a 2-letter code for comparisons below
+        lang_2 = (language or "en").lower().split("-")[0]
+
+        # 1. Try Chatterbox voice cloning — English only (PerthNet architecture,
+        #    trained on English corpus only; non-English text produces wrong language).
+        #    Skipped automatically when lang_2 != "en".
+        if reference_audio and os.path.isfile(reference_audio) and lang_2 == "en":
+            try:
+                self._generate_chatterbox(text, reference_audio, output_path)
+                self._last_backend = "chatterbox"
+                if tone != "Normal" or mood != 5:
+                    self._apply_tone_mood(output_path, tone, mood)
+                return output_path
+            except ImportError as exc:
+                self._last_clone_errors.append(f"ChatterboxTTS not installed: {exc}")
+            except Exception as exc:
+                self._last_clone_errors.append(f"ChatterboxTTS error: {exc}")
+
+        # 2. Try Coqui XTTS v2 — multilingual (Python 3.9–3.11 only)
+        if reference_audio and os.path.isfile(reference_audio):
+            try:
+                self._generate_xtts(text, reference_audio, lang_2, output_path)
+                self._last_backend = "xtts"
+                if tone != "Normal" or mood != 5:
+                    self._apply_tone_mood(output_path, tone, mood)
+                return output_path
+            except ImportError as exc:
+                self._last_clone_errors.append(f"XTTS v2 not installed: {exc}")
+            except Exception as exc:
+                self._last_clone_errors.append(f"XTTS v2 error: {exc}")
+
+        # 3. edge-tts (primary neural voices)
         try:
             self._generate_edge(text, voice_short_name, output_path)
+            self._last_backend = "edge-tts"
         except Exception as edge_err:
+            # 4. pyttsx3 offline fallback
             try:
                 self._generate_pyttsx3(text, output_path)
+                self._last_backend = "pyttsx3"
             except Exception as tts_err:
                 raise RuntimeError(
                     f"edge-tts failed ({edge_err}); offline fallback also failed ({tts_err})"
@@ -81,16 +140,208 @@ class TTSEngine:
         """Return duration of *audio_path* in milliseconds."""
         return len(AudioSegment.from_file(audio_path))
 
+    @staticmethod
+    def cloning_backend() -> str | None:
+        """Return the name of the first available voice-cloning backend, or None.
+
+        Probes import availability without loading model weights.
+
+        :returns: ``"chatterbox"``, ``"xtts"``, or ``None`` if neither is installed.
+        """
+        try:
+            import chatterbox.tts  # noqa: F401
+            return "chatterbox"
+        except ImportError:
+            pass
+        try:
+            import TTS  # noqa: F401
+            return "xtts"
+        except ImportError:
+            pass
+        return None
+
+    @staticmethod
+    def multilingual_cloning_available() -> bool:
+        """Return True if Coqui XTTS v2 (multilingual cloning) is installed.
+
+        Probes the ``TTS`` package import without loading model weights.
+        XTTS v2 is required for non-English voice cloning (pt-BR, fr, es, zh…).
+        ChatterboxTTS (checked by :meth:`cloning_backend`) is English-only.
+        """
+        try:
+            import TTS  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    @staticmethod
+    def cloning_install_instructions() -> str:
+        """Return a user-facing string with install instructions for voice cloning."""
+        import sys
+        py = sys.version_info
+        if py >= (3, 12):
+            return (
+                f"Voice cloning is not available on Python {py.major}.{py.minor}.\n\n"
+                "Re-run setup.bat — it will automatically install Python 3.11,\n"
+                "create a virtual environment, and install both cloning engines:\n"
+                "  • Chatterbox TTS  (English cloning,  ~400 MB model)\n"
+                "  • Coqui XTTS v2   (pt-BR / fr / es / zh / …, ~2 GB model)\n\n"
+                "The app works now with 400+ Microsoft Edge TTS neural voices.\n"
+                "Voice cloning (sounds like the reference speaker) needs Python 3.11."
+            )
+        return (
+            "Re-run setup.bat to install the voice cloning engines:\n\n"
+            "  • Chatterbox TTS  — English cloning (~400 MB, downloaded on first use)\n"
+            "  • Coqui XTTS v2   — multilingual cloning: pt-BR, fr, es, zh, …\n"
+            "                       (~2 GB model, downloaded on first use)\n\n"
+            "setup.bat handles everything automatically."
+        )
+
+    def apply_tone_mood(self, audio_path: str, tone: str, mood: int) -> str:
+        """
+        Apply *tone* preset and *mood* (1–10) to *audio_path* in place.
+
+        Identical to the post-processing step in :meth:`generate`.
+        This public method allows external callers (e.g. the Edit tab) to
+        apply tweaks to an already-synthesised file without re-generating.
+
+        :returns: *audio_path* (unchanged path, file is modified in place).
+        """
+        if tone != "Normal" or mood != 5:
+            self._apply_tone_mood(audio_path, tone, mood)
+        return audio_path
+
     # ── Backends ─────────────────────────────────────────────────────────────
+
+    # ── Chatterbox TTS (primary cloning backend, Python 3.10+) ───────────────
+
+    def _get_chatterbox(self):
+        """Lazy-load and cache the ChatterboxTTS model.
+
+        Downloads ~400 MB from HuggingFace on first use.
+        Raises ``ImportError`` if the ``chatterbox-tts`` package is not installed.
+        """
+        if self._chatterbox is None:
+            from chatterbox.tts import ChatterboxTTS  # noqa: PLC0415
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._chatterbox = ChatterboxTTS.from_pretrained(device=device)
+        return self._chatterbox
+
+    def _generate_chatterbox(self, text: str, reference_audio: str, output_path: str):
+        """Clone the voice in *reference_audio* and synthesise *text* via Chatterbox.
+
+        **English only** — PerthNet (the underlying architecture) was trained on an
+        English corpus and cannot produce correct speech in other languages.
+        The caller (``generate``) skips this backend when ``language != "en"``.
+
+        ChatterboxTTS supports Python 3.10–3.11.  On Python 3.12+ the required
+        numpy 1.24–1.25 wheels are unavailable, so this path raises ImportError
+        and the caller falls through to XTTS v2 or edge-tts.
+
+        :raises ImportError: if the ``chatterbox-tts`` package is not installed.
+        """
+        import soundfile as sf  # noqa: PLC0415
+
+        tts = self._get_chatterbox()
+        wav = tts.generate(text, audio_prompt_path=reference_audio)
+        sf.write(output_path, wav.squeeze().numpy(), tts.sr)
+
+    # ── XTTS v2 (secondary cloning backend, Python 3.9–3.11 only) ────────────
+
+    # Language codes accepted by XTTS v2
+    _XTTS_LANGUAGES = {
+        "en", "es", "fr", "de", "it", "pt", "pl", "tr",
+        "ru", "nl", "cs", "ar", "zh-cn", "ja", "hu", "ko",
+    }
+    # Pre-sorted string for error messages — computed once, not on every error
+    _XTTS_LANGUAGES_STR: str = ""  # filled in below the class body
+
+    def _get_xtts(self):
+        """Lazy-load and cache the Coqui XTTS v2 model.
+
+        Downloads ~2 GB on first use (stored in the user's TTS model cache).
+        Raises ``ImportError`` if the ``TTS``/``coqui-tts`` package is not installed.
+
+        ``COQUI_TOS_AGREED=1`` is set automatically so the model loads
+        without an interactive Terms-of-Service prompt.
+
+        PyTorch 2.6 changed ``torch.load`` to default ``weights_only=True``.
+        XTTS v2 checkpoints embed custom Python classes that must be explicitly
+        allowlisted via ``torch.serialization.add_safe_globals`` before loading.
+        We register all four XTTS config/model classes that appear in the checkpoint.
+        On older PyTorch (<2.6) ``add_safe_globals`` may not exist — the try/except
+        handles that gracefully (the attribute guard is also a safety net for the
+        call itself so the TypeError from a bad arg list never propagates).
+        """
+        if self._xtts is None:
+            import torch  # noqa: PLC0415  – needed to detect CUDA availability
+            from TTS.api import TTS as CoquiTTS  # noqa: PLC0415
+            # Accept XTTS v2 Terms of Service non-interactively.
+            # Without this the library raises TosAgreementError on first load.
+            os.environ["COQUI_TOS_AGREED"] = "1"
+
+            # PyTorch 2.6+ fix: allowlist XTTS custom classes for safe unpickling.
+            # Without this, torch.load raises WeightsUnpickler error for XttsConfig
+            # and related classes.  Guarded so it's a no-op on PyTorch < 2.6.
+            try:
+                from TTS.tts.configs.xtts_config import XttsConfig        # noqa: PLC0415
+                from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs  # noqa: PLC0415
+                from TTS.config import BaseDatasetConfig                    # noqa: PLC0415
+                if hasattr(torch.serialization, "add_safe_globals"):
+                    torch.serialization.add_safe_globals(
+                        [XttsConfig, XttsAudioConfig, XttsArgs, BaseDatasetConfig]
+                    )
+            except (ImportError, AttributeError, TypeError):
+                pass  # Older torch or partial TTS install — let TTS handle it
+
+            gpu = torch.cuda.is_available()
+            self._xtts = CoquiTTS(
+                "tts_models/multilingual/multi-dataset/xtts_v2",
+                gpu=gpu,
+            )
+        return self._xtts
+
+    def _generate_xtts(self, text: str, reference_audio: str,
+                       language: str, output_path: str):
+        """Clone the voice in *reference_audio* and synthesise *text*.
+
+        Uses Coqui XTTS v2 for zero-shot cross-lingual voice cloning.
+        The reference recording should be 3–30 s of clean speech.
+
+        :raises ImportError: if the ``TTS`` package is not installed.
+        :raises ValueError: if *language* is not in :attr:`_XTTS_LANGUAGES`.
+        """
+        lang = language.lower()
+        # Normalise Chinese variants to XTTS's expected code
+        if lang.startswith("zh"):
+            lang = "zh-cn"
+        if lang not in self._XTTS_LANGUAGES:
+            raise ValueError(
+                f"Language '{language}' is not supported by XTTS v2. "
+                f"Supported codes: {self._XTTS_LANGUAGES_STR}. "
+                "For unsupported languages, edge-tts neural voices are used."
+            )
+
+        tts = self._get_xtts()
+        tts.tts_to_file(
+            text=text,
+            speaker_wav=reference_audio,
+            language=lang,
+            file_path=output_path,
+        )
 
     def _generate_edge(self, text: str, voice: str, output_path: str):
         """Synthesise with edge-tts and write a WAV to *output_path*."""
-        import edge_tts
+        import edge_tts  # noqa: F401 — imported for side-effects (verifies install)
 
         tmp_mp3 = output_path + ".tmp.mp3"
-        asyncio.run(self._edge_communicate(text, voice, tmp_mp3))
-        audio = AudioSegment.from_file(tmp_mp3, format="mp3")
-        os.remove(tmp_mp3)
+        try:
+            asyncio.run(self._edge_communicate(text, voice, tmp_mp3))
+            audio = AudioSegment.from_file(tmp_mp3, format="mp3")
+        finally:
+            if os.path.exists(tmp_mp3):
+                os.remove(tmp_mp3)
         audio.export(output_path, format="wav")
 
     @staticmethod
@@ -128,8 +379,38 @@ class TTSEngine:
 
     @staticmethod
     def _change_speed(audio: AudioSegment, factor: float) -> AudioSegment:
-        """Resample to change playback speed (also shifts pitch slightly)."""
-        new_rate = int(audio.frame_rate * factor)
+        """Pitch-preserving time-stretch using WSOLA (via librosa).
+
+        Unlike the naive frame-rate resampling approach, this stretches or
+        compresses the waveform in the time domain so speed changes without
+        altering the speaker's pitch — critical for keeping cloned voices
+        recognisable after tone/mood post-processing.
+        """
+        import numpy as np
+        import librosa
+
+        # Convert to float32 mono
+        raw = np.array(audio.get_array_of_samples(), dtype=np.float32)
+        peak = float(1 << (8 * audio.sample_width - 1))
+        samples = raw / peak
+        if audio.channels == 2:
+            samples = samples.reshape(-1, 2).mean(axis=1)
+
+        # WSOLA time-stretch (rate > 1 → faster, rate < 1 → slower)
+        stretched = librosa.effects.time_stretch(samples, rate=float(factor))
+
+        # Back to pydub int samples
+        stretched_int = (stretched * peak).clip(-peak, peak - 1).astype(
+            np.dtype(f"<i{audio.sample_width}")
+        )
         return audio._spawn(
-            audio.raw_data, overrides={"frame_rate": new_rate}
-        ).set_frame_rate(audio.frame_rate)
+            stretched_int.tobytes(),
+            overrides={
+                "frame_rate": audio.frame_rate,
+                "channels": 1,
+                "sample_width": audio.sample_width,
+            },
+        )
+
+# Fill the class-level language string after the class is fully defined
+TTSEngine._XTTS_LANGUAGES_STR = ", ".join(sorted(TTSEngine._XTTS_LANGUAGES))

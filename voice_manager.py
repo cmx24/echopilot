@@ -183,7 +183,23 @@ class VoiceManager:
 
     @staticmethod
     def get_locale_for_language(language: str) -> str:
-        """Return an edge-tts locale code for a given language display name."""
-        rev = {v: k for k, v in LANGUAGE_MAP.items()}
-        code = rev.get(language, "en")
-        return LOCALE_MAP.get(code, "en-US")
+        """Return an edge-tts locale code for a given language display name.
+
+        ``language`` may be either a display name (e.g. ``"French"``) or a
+        BCP-47 language code (e.g. ``"fr"``).  Both forms are accepted.
+        """
+        # If it looks like a code already (e.g. "fr", "zh-cn") normalise first
+        lang_lower = language.lower()
+        if lang_lower.startswith("zh"):
+            return "zh-CN"
+        if lang_lower in LOCALE_MAP:
+            return LOCALE_MAP[lang_lower]
+
+        # Display-name lookup — resolve collisions by preferring the shortest key
+        # (e.g. "Chinese" → "zh" not "zh-tw" which isn't in LOCALE_MAP)
+        matching_codes = [k for k, v in LANGUAGE_MAP.items() if v == language]
+        if matching_codes:
+            code = min(matching_codes, key=len)
+            return LOCALE_MAP.get(code, "en-US")
+
+        return "en-US"

@@ -1,4 +1,4 @@
-﻿; build/installer.nsi - minimal NSIS script
+; build/installer.nsi - minimal NSIS script
 Name "XTTS Local"
 OutFile "xtts_local_installer.exe"
 InstallDir "$PROGRAMFILES\XTTS Local"

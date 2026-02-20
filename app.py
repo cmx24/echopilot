@@ -1,14 +1,16 @@
 """EchoPilot — Text-to-Speech Studio (PyQt5 GUI)."""
 
+from __future__ import annotations
+
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QSettings, QThread, QUrl, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -30,6 +32,12 @@ from PyQt5.QtWidgets import (
     QWidget,
     QTabWidget,
 )
+
+try:
+    from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+    _HAS_QTMULTIMEDIA = True
+except (ImportError, RuntimeError):
+    _HAS_QTMULTIMEDIA = False
 
 from tts_engine import TTSEngine, TONES
 from voice_manager import VoiceManager
@@ -132,6 +140,24 @@ class EchoPilot(QMainWindow):
         self._tts_worker: TTSWorker = None
         self._analyze_worker: AnalyzeWorker = None
         self._play_proc: subprocess.Popen = None
+        self._font_size: int = 13
+        self._cloning_backend: str | None = TTSEngine.cloning_backend()
+        self._cloning_warn_shown: bool = False   # only show the install-instructions dialog once
+
+        # In-app audio player (avoids launching the system media app)
+        if _HAS_QTMULTIMEDIA:
+            try:
+                self._player = QMediaPlayer()
+                self._player.error.connect(
+                    lambda e: QMessageBox.warning(
+                        self, "Playback Error",
+                        self._player.errorString() or f"Playback error {e}",
+                    )
+                )
+            except Exception:
+                self._player = None
+        else:
+            self._player = None
 
         tabs = QTabWidget()
         self.setCentralWidget(tabs)
@@ -141,11 +167,110 @@ class EchoPilot(QMainWindow):
         tabs.addTab(self._build_edit_tab(),       "✂   Edit & Save")
         self.setStyleSheet(self._STYLE)
 
+        # Restore settings from previous session
+        self._restore_settings()
+
+        # Warn at startup if no voice cloning backend is available
+        if self._cloning_backend is None:
+            py = sys.version_info
+            if py >= (3, 12):
+                self.statusBar().showMessage(
+                    f"⚠ Voice cloning unavailable on Python {py.major}.{py.minor} "
+                    f"— re-run setup.bat to auto-install Python 3.11 and enable cloning.",
+                    0,
+                )
+            else:
+                self.statusBar().showMessage(
+                    "⚠ Voice cloning package not installed — re-run setup.bat to enable it.",
+                    0,
+                )
+
+    # ── Settings persistence ──────────────────────────────────────────────────
+
+    _SETTINGS_ORG  = "EchoPilot"
+    _SETTINGS_APP  = "TTS Studio"
+
+    def _save_settings(self):
+        """Persist Generate-tab state so it survives app restarts."""
+        try:
+            s = QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
+            s.setValue("gen/text",      self.gen_text.toPlainText())
+            s.setValue("gen/lang",      self.gen_lang_combo.currentText())
+            s.setValue("gen/gender",    self.gen_gender_combo.currentText())
+            s.setValue("gen/voice",     self.gen_voice_combo.currentText())
+            s.setValue("gen/tone",      self.gen_tone_combo.currentText())
+            s.setValue("gen/mood",      self.gen_mood_slider.value())
+            s.setValue("app/font_size", self._font_size)
+            s.sync()
+        except Exception:  # noqa: BLE001 — best-effort; never crash on save
+            pass
+
+    def _restore_settings(self):
+        """Reload persisted Generate-tab state after widgets are built."""
+        s = QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
+
+        text = s.value("gen/text", "")
+        if text:
+            self.gen_text.setPlainText(text)
+
+        # Language + Gender — must come before voice repopulation
+        for combo, key in (
+            (self.gen_lang_combo,   "gen/lang"),
+            (self.gen_gender_combo, "gen/gender"),
+        ):
+            val = s.value(key, "")
+            if val:
+                idx = combo.findText(val)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+
+        # Repopulate voice list for restored language/gender, then restore voice
+        self._populate_gen_voice_combo()
+        voice_text = s.value("gen/voice", "")
+        if voice_text:
+            idx = self.gen_voice_combo.findText(voice_text)
+            if idx >= 0:
+                self.gen_voice_combo.setCurrentIndex(idx)
+
+        tone = s.value("gen/tone", "")
+        if tone:
+            idx = self.gen_tone_combo.findText(tone)
+            if idx >= 0:
+                self.gen_tone_combo.setCurrentIndex(idx)
+
+        mood = s.value("gen/mood", None)
+        if mood is not None:
+            try:
+                self.gen_mood_slider.setValue(int(mood))
+            except (TypeError, ValueError):
+                pass
+
+        font = s.value("app/font_size", None)
+        if font is not None:
+            try:
+                self._font_size = max(9, min(24, int(font)))
+                self._apply_font_size()
+            except (TypeError, ValueError):
+                pass
+
+    def closeEvent(self, event):
+        self._save_settings()
+        super().closeEvent(event)
+
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _play_file(self, path: str):
-        """Play an audio file using the best available system player."""
+        """Play *path* inside the app via QMediaPlayer; subprocess fallback on Linux/macOS."""
         self._stop_playback()
+        if not path or not os.path.isfile(path):
+            return
+        if self._player is not None:
+            self._player.setMedia(
+                QMediaContent(QUrl.fromLocalFile(os.path.abspath(path)))
+            )
+            self._player.play()
+            return
+        # Subprocess fallback (Linux / macOS — these don't open a GUI window)
         system = platform.system()
         try:
             if system == "Linux":
@@ -166,18 +291,53 @@ class EchoPilot(QMainWindow):
                 )
             elif system == "Darwin":
                 self._play_proc = subprocess.Popen(["afplay", path])
-            else:
-                try:
-                    os.startfile(path)
-                except OSError as exc:
-                    QMessageBox.warning(self, "Playback Error", str(exc))
         except Exception as exc:
             QMessageBox.warning(self, "Playback Error", str(exc))
 
     def _stop_playback(self):
+        if self._player is not None:
+            self._player.stop()
         if self._play_proc and self._play_proc.poll() is None:
             self._play_proc.terminate()
         self._play_proc = None
+
+    # ── Zoom support (Ctrl + mouse-wheel) ─────────────────────────────────────
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            self._font_size = max(9, min(24, self._font_size + (1 if delta > 0 else -1)))
+            self._apply_font_size()
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def _apply_font_size(self):
+        style = re.sub(r'font-size:\s*\d+px', f'font-size: {self._font_size}px', self._STYLE)
+        self.setStyleSheet(style)
+
+    # ── Voice helpers ─────────────────────────────────────────────────────────
+
+    def _best_builtin_voice(self, language: str, gender: str) -> str:
+        """Return the short_name of the best built-in voice for *language* / *gender*.
+
+        Tries in order: exact language+gender → same language any gender →
+        any language same gender → absolute default.
+        """
+        valid_gender = gender if gender in ("Female", "Male") else None
+        valid_lang = language if language and language not in ("Unknown", "All", "") else None
+        for lg, gd in (
+            (valid_lang, valid_gender),
+            (valid_lang, None),
+            (None, valid_gender),
+        ):
+            voices = [
+                v for v in self.vm.get_all_voices(gender=gd, language=lg)
+                if v["type"] == "builtin"
+            ]
+            if voices:
+                return voices[0]["short_name"]
+        return "en-US-AriaNeural"
 
     @staticmethod
     def _hbox(*widgets) -> QHBoxLayout:
@@ -314,7 +474,56 @@ class EchoPilot(QMainWindow):
             self.gen_voice_combo.addItem(f"{tag} {v['name']}", v)
         self.gen_voice_combo.blockSignals(False)
 
+    def _resolve_lang_code(self, profile_language: str, text: str) -> str:
+        """Return a 2-letter language code for cloning backends.
+
+        Priority:
+        1. Language saved in the voice profile (if set and not placeholder)
+        2. Language currently selected in the Generate tab filter (if not "All")
+        3. Auto-detect from the input text via langdetect (returns a code directly)
+        4. Hard fallback: "en"
+
+        ``profile_language`` and the combo value are display names (e.g. "French").
+        langdetect returns 2-letter codes (e.g. "fr") — those are used directly
+        without going through ``get_locale_for_language``.
+        """
+        # Steps 1 and 2 — display names (e.g. "French")
+        display_name: str | None = None
+        if profile_language and profile_language not in ("", "Unknown", "All"):
+            display_name = profile_language
+        if display_name is None:
+            combo_lang = self.gen_lang_combo.currentText()
+            if combo_lang not in ("", "All"):
+                display_name = combo_lang
+
+        if display_name is not None:
+            locale = self.vm.get_locale_for_language(display_name).lower()
+            if locale.startswith("zh"):
+                return "zh-cn"
+            return locale.split("-")[0] or "en"
+
+        # Step 3 — langdetect returns a BCP-47 code like "fr" directly
+        try:
+            from langdetect import detect as _ld, LangDetectException  # noqa: PLC0415
+            code = (_ld(text[:500]) or "en").lower()
+        except (ImportError, LangDetectException):
+            code = "en"
+
+        if code.startswith("zh"):
+            return "zh-cn"
+        return code.split("-")[0] or "en"
+
     def _on_generate(self):
+        # Guard: do not replace a still-running worker — GC of a live QThread crashes PyQt5.
+        # This can happen if a Bank tab preview is in progress and the user switches to
+        # Generate and clicks Generate before the preview thread finishes.
+        if self._tts_worker and self._tts_worker.isRunning():
+            QMessageBox.information(
+                self, "Busy",
+                "Please wait for the current operation to finish before generating.",
+            )
+            return
+
         text = self.gen_text.toPlainText().strip()
         if not text:
             QMessageBox.warning(self, "Empty Text", "Please enter some text to synthesise.")
@@ -324,31 +533,44 @@ class EchoPilot(QMainWindow):
             QMessageBox.warning(self, "No Voice", "Please select a voice.")
             return
 
+        params = {
+            "text": text,
+            "tone": self.gen_tone_combo.currentText(),
+            "mood": self.gen_mood_slider.value(),
+        }
+
         if voice_data.get("type") == "custom":
+            language = voice_data.get("language", "")
+            gender = voice_data.get("gender", "")
+            short_name = self._best_builtin_voice(language, gender)
+            params["voice_short_name"] = short_name
+
             ref = voice_data.get("reference_audio", "")
-            if not ref or not os.path.isfile(ref):
-                QMessageBox.information(
-                    self, "Custom Voice — No Reference Audio",
-                    "This custom voice profile has no reference audio file.\n\n"
-                    "Neural voice cloning (XTTS v2 / OpenVoice) requires a reference\n"
-                    "audio file to be set when saving the profile.\n\n"
-                    "Falling back to the default built-in voice for now.",
-                )
-            short_name = "en-US-AriaNeural"
+            if ref and os.path.isfile(ref):
+                # Derive the 2-letter language code via priority fallback
+                lang_code = self._resolve_lang_code(language, text)
+                params["reference_audio"] = ref
+                params["language"] = lang_code
+                if lang_code == "en":
+                    hint = "⏳ Cloning voice (English)… first run downloads ~400 MB"
+                else:
+                    hint = (
+                        f"⏳ Cloning voice ({lang_code.upper()}) via XTTS v2…"
+                        " first run downloads ~2 GB"
+                    )
+                self.gen_status.setText(hint)
+            else:
+                self.gen_status.setText(f"ℹ No reference audio — using {short_name}")
         else:
-            short_name = voice_data.get("short_name", "en-US-AriaNeural")
+            params["voice_short_name"] = voice_data.get("short_name", "en-US-AriaNeural")
 
         self.gen_btn.setEnabled(False)
         self.gen_play_btn.setEnabled(False)
         self.gen_save_btn.setEnabled(False)
-        self.gen_status.setText("⏳ Generating…")
+        if "⏳" not in self.gen_status.text():
+            self.gen_status.setText("⏳ Generating…")
 
-        self._tts_worker = TTSWorker(self.engine, {
-            "text": text,
-            "voice_short_name": short_name,
-            "tone": self.gen_tone_combo.currentText(),
-            "mood": self.gen_mood_slider.value(),
-        })
+        self._tts_worker = TTSWorker(self.engine, params)
         self._tts_worker.finished.connect(self._on_generate_done)
         self._tts_worker.error.connect(self._on_generate_error)
         self._tts_worker.start()
@@ -357,7 +579,36 @@ class EchoPilot(QMainWindow):
         self._current_audio = path
         dur = self.engine.get_duration_ms(path) / 1000.0
         self.gen_audio_info.setText(f"✔ {os.path.basename(path)}  ({dur:.1f} s)")
-        self.gen_status.setText("✔ Done")
+
+        backend = self.engine._last_backend
+        errors  = self.engine._last_clone_errors
+        if backend in ("chatterbox", "xtts"):
+            label = "ChatterboxTTS" if backend == "chatterbox" else "XTTS v2"
+            self.gen_status.setText(f"✔ Done — voice cloned with {label}")
+        elif errors:
+            # Cloning was attempted but fell back; show actionable information
+            reason = errors[0].split(":")[0]   # e.g. "ChatterboxTTS not installed"
+            self.gen_status.setText(f"⚠ Cloning failed ({reason}) — used {backend}")
+            # Show the dialog once per session for ANY cloning failure
+            # (not just "not installed" — also covers TosAgreementError, CUDA errors, etc.)
+            if not self._cloning_warn_shown:
+                self._cloning_warn_shown = True
+                detail = "\n".join(f"  • {e}" for e in errors)
+                is_missing = any("not installed" in e for e in errors)
+                if is_missing:
+                    hint = TTSEngine.cloning_install_instructions()
+                else:
+                    hint = ("Re-run setup.bat if the error persists, or check your internet "
+                            "connection (XTTS v2 downloads ~2 GB on first use).")
+                body = (
+                    "⚠  Voice cloning failed — the output uses a standard neural voice "
+                    "and does NOT sound like your reference speaker.\n\n"
+                    f"Error detail:\n{detail}\n\n{hint}"
+                )
+                QMessageBox.warning(self, "Voice Cloning Failed", body)
+        else:
+            self.gen_status.setText(f"✔ Done — {backend}")
+
         self.gen_btn.setEnabled(True)
         self.gen_play_btn.setEnabled(True)
         self.gen_stop_btn.setEnabled(True)
@@ -366,6 +617,9 @@ class EchoPilot(QMainWindow):
     def _on_generate_error(self, msg: str):
         self.gen_status.setText("✘ Error")
         self.gen_btn.setEnabled(True)
+        self.gen_play_btn.setEnabled(self._current_audio is not None)
+        self.gen_stop_btn.setEnabled(True)
+        self.gen_save_btn.setEnabled(self._current_audio is not None)
         QMessageBox.critical(self, "Generation Error", msg)
 
     def _save_current_audio(self):
@@ -378,8 +632,11 @@ class EchoPilot(QMainWindow):
         if not path:
             return
         fmt = "mp3" if path.lower().endswith(".mp3") else "wav"
-        self.engine.save_as(self._current_audio, path, fmt)
-        QMessageBox.information(self, "Saved", f"Saved to:\n{path}")
+        try:
+            self.engine.save_as(self._current_audio, path, fmt)
+            QMessageBox.information(self, "Saved", f"Saved to:\n{path}")
+        except Exception as exc:  # pydub raises various errors (CouldntEncodeError, OSError…)
+            QMessageBox.critical(self, "Save Error", str(exc))
 
     # ══════════════════════════════════════════════════════════════════════════
     # Tab 2 — Clone Voice
@@ -403,6 +660,55 @@ class EchoPilot(QMainWindow):
         browse_btn.clicked.connect(self._browse_reference)
         row.addWidget(browse_btn)
         rl.addLayout(row)
+
+        # Duration + quality hint row
+        dur_row = QHBoxLayout()
+        self.clone_ref_duration = QLabel("Duration: —  |  Recommend ≥ 5 s of clean speech for best cloning")
+        self.clone_ref_duration.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        dur_row.addWidget(self.clone_ref_duration)
+        dur_row.addStretch()
+        rl.addLayout(dur_row)
+
+        # Cloning backend availability banner
+        if self._cloning_backend is None:
+            py = sys.version_info
+            warn_label = QLabel(
+                f"⚠  Voice cloning is NOT available — "
+                + (
+                    f"Python {py.major}.{py.minor} detected.  "
+                    "Re-run setup.bat — it will automatically install Python 3.11 and enable cloning."
+                    if py >= (3, 12) else
+                    "Re-run setup.bat to install the chatterbox-tts package."
+                )
+            )
+            warn_label.setStyleSheet(
+                "color: #f38ba8; font-size: 11px; font-weight: bold; "
+                "padding: 4px; background: #45475a; border-radius: 4px;"
+            )
+            warn_label.setWordWrap(True)
+            rl.addWidget(warn_label)
+        else:
+            xtts_ok = TTSEngine.multilingual_cloning_available()
+            if xtts_ok:
+                # Language sample list mirrors TTSEngine._XTTS_LANGUAGES subset
+                banner_text = (
+                    "✔  Voice cloning ready  ·  "
+                    "English (Chatterbox, ~400 MB on first use)  ·  "
+                    "Multilingual pt-BR / fr / es / zh / … (XTTS v2, ~2 GB on first use)"
+                )
+                banner_style = "color: #a6e3a1; font-size: 11px;"
+            else:
+                # Language sample list mirrors TTSEngine._XTTS_LANGUAGES subset
+                banner_text = (
+                    "✔  English cloning ready (Chatterbox, ~400 MB on first use)  ·  "
+                    "⚠ Multilingual cloning (pt-BR, fr, es…) unavailable — "
+                    "re-run setup.bat to install Coqui XTTS v2."
+                )
+                banner_style = "color: #f9e2af; font-size: 11px;"
+            ok_label = QLabel(banner_text)
+            ok_label.setStyleSheet(banner_style)
+            ok_label.setWordWrap(True)
+            rl.addWidget(ok_label)
 
         detect_row = QHBoxLayout()
         self.clone_detect_btn = QPushButton("🔍  Auto-Detect Gender")
@@ -440,7 +746,7 @@ class EchoPilot(QMainWindow):
         meta_row.addWidget(QLabel("Language:"))
         self.clone_lang_combo = QComboBox()
         self.clone_lang_combo.addItems(
-            [l for l in self.vm.get_all_languages() if l != "All"]
+            [lang for lang in self.vm.get_all_languages() if lang != "All"]
         )
         meta_row.addWidget(self.clone_lang_combo)
         meta_row.addStretch()
@@ -489,19 +795,43 @@ class EchoPilot(QMainWindow):
             self.clone_file_edit.setText(path)
             self.clone_detect_btn.setEnabled(True)
             self.clone_status.setText("")
+            self._update_ref_duration(path)
+
+    def _update_ref_duration(self, path: str):
+        """Display reference audio duration and warn if too short for cloning."""
+        try:
+            dur_s = self.engine.get_duration_ms(path) / 1000.0
+            if dur_s < 3:
+                label = f"Duration: {dur_s:.1f} s  ⚠ Too short — minimum 3 s required"
+                self.clone_ref_duration.setStyleSheet("color: #f38ba8; font-size: 11px;")
+            elif dur_s < 5:
+                label = f"Duration: {dur_s:.1f} s  ⚠ Short — 5–15 s recommended for best results"
+                self.clone_ref_duration.setStyleSheet("color: #fab387; font-size: 11px;")
+            else:
+                label = f"Duration: {dur_s:.1f} s  ✔ Good length for voice cloning"
+                self.clone_ref_duration.setStyleSheet("color: #a6e3a1; font-size: 11px;")
+            self.clone_ref_duration.setText(label)
+        except Exception:
+            self.clone_ref_duration.setText("Duration: unable to read file")
+            self.clone_ref_duration.setStyleSheet("color: #a6adc8; font-size: 11px;")
 
     def _detect_gender(self):
         path = self.clone_file_edit.text()
         if not path or not os.path.isfile(path):
             return
+        # Guard: do not start a second analysis while one is already running
+        if self._analyze_worker and self._analyze_worker.isRunning():
+            return
         self.clone_detect_btn.setEnabled(False)
         self.clone_gender_detected.setText("Detecting…")
         self._analyze_worker = AnalyzeWorker(self.vm, path)
         self._analyze_worker.result.connect(self._on_gender_detected)
-        self._analyze_worker.error.connect(
-            lambda e: self.clone_gender_detected.setText(f"Error: {e}")
-        )
+        self._analyze_worker.error.connect(self._on_gender_detect_error)
         self._analyze_worker.start()
+
+    def _on_gender_detect_error(self, msg: str):
+        self.clone_gender_detected.setText(f"Error: {msg}")
+        self.clone_detect_btn.setEnabled(True)
 
     def _on_gender_detected(self, gender: str):
         self.clone_gender_detected.setText(f"Detected gender: {gender}")
@@ -530,13 +860,39 @@ class EchoPilot(QMainWindow):
         notes    = self.clone_notes_edit.text()
         ref_src  = self.clone_file_edit.text()
 
+        # Warn if reference audio is too short for quality cloning
+        if ref_src and os.path.isfile(ref_src):
+            try:
+                dur_s = self.engine.get_duration_ms(ref_src) / 1000.0
+                if dur_s < 3:
+                    QMessageBox.warning(
+                        self, "Reference Too Short",
+                        f"The reference recording is only {dur_s:.1f} s.\n\n"
+                        "Voice cloning requires at least 3 seconds, and works best\n"
+                        "with 5–15 seconds of clean, noise-free speech.\n\n"
+                        "Please select a longer recording.",
+                    )
+                    return
+                if dur_s < 5:
+                    ans = QMessageBox.question(
+                        self, "Short Reference Recording",
+                        f"The reference is {dur_s:.1f} s (recommended: ≥ 5 s).\n\n"
+                        "Short recordings may produce poor voice similarity.\n"
+                        "Save anyway?",
+                    )
+                    if ans != QMessageBox.Yes:
+                        return
+            except Exception:
+                pass
+
         # Copy reference audio into profiles/
         ref_dest = ""
         if ref_src and os.path.isfile(ref_src):
             profiles_dir = os.path.join(BASE_DIR, "profiles")
             os.makedirs(profiles_dir, exist_ok=True)
             ext = os.path.splitext(ref_src)[1]
-            safe = name.replace(" ", "_")
+            # Sanitize name to prevent path-traversal; mirrors VoiceManager.save_custom_voice
+            safe = re.sub(r"[^\w\s\-]", "", name).strip().replace(" ", "_")
             ref_dest = os.path.join(profiles_dir, f"{safe}_ref{ext}")
             if os.path.abspath(ref_src) != os.path.abspath(ref_dest):
                 shutil.copy2(ref_src, ref_dest)
@@ -649,6 +1005,10 @@ class EchoPilot(QMainWindow):
             if ref and os.path.isfile(ref):
                 self._play_file(ref)
                 return
+        # Guard: do not replace a still-running worker — GC of a live QThread crashes PyQt5
+        if self._tts_worker and self._tts_worker.isRunning():
+            QMessageBox.information(self, "Busy", "Please wait for the current generation to finish.")
+            return
         short_name = voice.get("short_name", "en-US-AriaNeural")
         self._tts_worker = TTSWorker(self.engine, {
             "text": "Hello, this is a voice preview.",
@@ -754,6 +1114,45 @@ class EchoPilot(QMainWindow):
         tl.addLayout(trim_btn_row)
         layout.addWidget(trim_grp)
 
+        # — Live Tweaks —
+        tweak_grp = QGroupBox("Live Tweaks (non-destructive until Apply)")
+        twl = QVBoxLayout(tweak_grp)
+
+        tweak_row1 = QHBoxLayout()
+        tweak_row1.addWidget(QLabel("Tone:"))
+        self.edit_tone_combo = QComboBox()
+        self.edit_tone_combo.addItems(TONES)
+        tweak_row1.addWidget(self.edit_tone_combo)
+        tweak_row1.addWidget(QLabel("Mood (1–10):"))
+        self.edit_mood_slider = QSlider(Qt.Horizontal)
+        self.edit_mood_slider.setRange(1, 10)
+        self.edit_mood_slider.setValue(5)
+        self.edit_mood_slider.setMaximumWidth(200)
+        self.edit_mood_slider.setTickPosition(QSlider.TicksBelow)
+        self.edit_mood_slider.setTickInterval(1)
+        tweak_row1.addWidget(self.edit_mood_slider)
+        self.edit_mood_val = QLabel("5")
+        self.edit_mood_val.setMinimumWidth(20)
+        self.edit_mood_slider.valueChanged.connect(
+            lambda v: self.edit_mood_val.setText(str(v))
+        )
+        tweak_row1.addWidget(self.edit_mood_val)
+        tweak_row1.addStretch()
+        twl.addLayout(tweak_row1)
+
+        tweak_row2 = QHBoxLayout()
+        self.preview_tweaks_btn = QPushButton("▶  Preview Tweaks")
+        self.preview_tweaks_btn.setEnabled(False)
+        self.preview_tweaks_btn.clicked.connect(self._preview_tweaks)
+        tweak_row2.addWidget(self.preview_tweaks_btn)
+        self.apply_tweaks_btn = QPushButton("✔  Apply Tweaks")
+        self.apply_tweaks_btn.setEnabled(False)
+        self.apply_tweaks_btn.clicked.connect(self._apply_tweaks)
+        tweak_row2.addWidget(self.apply_tweaks_btn)
+        tweak_row2.addStretch()
+        twl.addLayout(tweak_row2)
+        layout.addWidget(tweak_grp)
+
         # — Export —
         export_grp = QGroupBox("Export Audio")
         el = QHBoxLayout(export_grp)
@@ -787,11 +1186,20 @@ class EchoPilot(QMainWindow):
         else:
             QMessageBox.information(self, "No Audio", "Generate audio first in the Generate tab.")
 
+    @staticmethod
+    def _fmt_dur(dur_ms: int) -> str:
+        """Format *dur_ms* milliseconds as a human-readable duration label."""
+        return f"Duration: {dur_ms / 1000:.2f} s  ({dur_ms} ms)"
+
     def _load_audio_for_edit(self, path: str):
+        try:
+            dur = self.engine.get_duration_ms(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Error", f"Cannot read audio file:\n{exc}")
+            return
         self._edit_audio = path
         self.edit_file_edit.setText(path)
-        dur = self.engine.get_duration_ms(path)
-        self.edit_dur_label.setText(f"Duration: {dur / 1000:.2f} s  ({dur} ms)")
+        self.edit_dur_label.setText(self._fmt_dur(dur))
         for slider in (self.edit_start_slider, self.edit_end_slider):
             slider.setRange(0, dur)
         self.edit_start_slider.setValue(0)
@@ -800,8 +1208,50 @@ class EchoPilot(QMainWindow):
         self.edit_end_lbl.setText(f"{dur} ms")
         self.play_orig_btn.setEnabled(True)
         self.trim_btn.setEnabled(True)
+        self.preview_tweaks_btn.setEnabled(True)
+        self.apply_tweaks_btn.setEnabled(True)
         self.export_btn.setEnabled(True)
         self.edit_status.setText("")
+
+    def _preview_tweaks(self):
+        """Apply tone/mood to a temporary copy and play it (non-destructive)."""
+        if not self._edit_audio or not os.path.isfile(self._edit_audio):
+            return
+        tmp = self._copy_edit_to_temp()
+        tone = self.edit_tone_combo.currentText()
+        mood = self.edit_mood_slider.value()
+        try:
+            self.engine.apply_tone_mood(tmp, tone, mood)
+        except Exception as exc:
+            QMessageBox.warning(self, "Preview Error", str(exc))
+            return
+        self.edit_status.setText(f"▶ Previewing: {tone}, mood {mood}")
+        self._play_file(tmp)
+
+    def _apply_tweaks(self):
+        """Apply tone/mood to a new working copy, making it the current audio."""
+        if not self._edit_audio or not os.path.isfile(self._edit_audio):
+            return
+        tmp = self._copy_edit_to_temp()
+        tone = self.edit_tone_combo.currentText()
+        mood = self.edit_mood_slider.value()
+        try:
+            self.engine.apply_tone_mood(tmp, tone, mood)
+        except Exception as exc:
+            QMessageBox.warning(self, "Apply Error", str(exc))
+            return
+        self._edit_audio = tmp
+        self.edit_dur_label.setText(self._fmt_dur(self.engine.get_duration_ms(tmp)))
+        self.edit_status.setText(f"✔ Applied: {tone}, mood {mood}")
+
+    def _copy_edit_to_temp(self) -> str:
+        """Copy the current edit audio to a new temp WAV and return its path."""
+        out_dir = os.path.join(BASE_DIR, "output")
+        os.makedirs(out_dir, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=out_dir)
+        os.close(fd)
+        shutil.copy2(self._edit_audio, tmp)
+        return tmp
 
     def _on_trim_slider_changed(self):
         start = self.edit_start_slider.value()
@@ -819,16 +1269,22 @@ class EchoPilot(QMainWindow):
             return
         start = self.edit_start_slider.value()
         end   = self.edit_end_slider.value()
+        if start >= end:
+            QMessageBox.warning(
+                self, "Invalid Trim Range",
+                f"Start ({start} ms) must be less than End ({end} ms).",
+            )
+            return
         # Work on a copy so original is preserved
-        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=os.path.join(BASE_DIR, "output"))
+        out_dir = os.path.join(BASE_DIR, "output")
+        os.makedirs(out_dir, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=out_dir)
         os.close(fd)
         shutil.copy2(self._edit_audio, tmp)
         self.engine.trim_audio(tmp, start, end)
         self._edit_audio = tmp
         dur = self.engine.get_duration_ms(tmp)
-        self.edit_dur_label.setText(
-            f"Duration (trimmed): {dur / 1000:.2f} s  ({dur} ms)"
-        )
+        self.edit_dur_label.setText(f"Duration (trimmed): {dur / 1000:.2f} s  ({dur} ms)")
         self.edit_status.setText(f"✔ Trimmed to {start}–{end} ms")
         self._play_file(tmp)
 
@@ -841,8 +1297,11 @@ class EchoPilot(QMainWindow):
             f"Audio (*.{fmt});;All Files (*)",
         )
         if path:
-            self.engine.save_as(self._edit_audio, path, fmt)
-            self.edit_status.setText(f"✔ Saved: {os.path.basename(path)}")
+            try:
+                self.engine.save_as(self._edit_audio, path, fmt)
+                self.edit_status.setText(f"✔ Saved: {os.path.basename(path)}")
+            except Exception as exc:  # pydub raises various errors (CouldntEncodeError, OSError…)
+                QMessageBox.critical(self, "Export Error", str(exc))
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
