@@ -40,8 +40,8 @@ class TTSEngine:
 
         When *reference_audio* is a valid file path, voice cloning is attempted:
 
-        1. **ChatterboxTTS** — zero-shot cloning, Python 3.10+, GPU/CPU,
-           pulls from HuggingFace on first use (~400 MB).
+        1. **ChatterboxTTS** — zero-shot cloning, Python 3.10–3.11 only (numpy
+           1.24–1.25 has no pre-built wheels for Python 3.12+).
         2. **Coqui XTTS v2** — zero-shot cloning, Python 3.9–3.11 only,
            ~2 GB model.  Used when ChatterboxTTS is unavailable.
         3. **edge-tts** — neural TTS without cloning (fallback).
@@ -63,7 +63,7 @@ class TTSEngine:
 
         self._last_clone_errors = []
 
-        # 1. Try Chatterbox voice cloning (Python 3.10+, works on 3.12)
+        # 1. Try Chatterbox voice cloning (Python 3.10–3.11; numpy wheel constraint blocks 3.12+)
         if reference_audio and os.path.isfile(reference_audio):
             try:
                 self._generate_chatterbox(text, reference_audio, output_path)
@@ -159,16 +159,20 @@ class TTSEngine:
         py = sys.version_info
         if py >= (3, 12):
             return (
-                "Voice cloning requires Python 3.11 or older.\n\n"
-                f"You are running Python {py.major}.{py.minor}.{py.micro}.\n\n"
-                "Options:\n"
-                "  1. Install Python 3.11 from https://www.python.org/downloads/\n"
-                "     and run setup.bat again — this will install chatterbox-tts.\n\n"
-                "  2. Install Python 3.11, create a virtual environment:\n"
+                f"Voice cloning is not available on Python {py.major}.{py.minor}.\n\n"
+                "chatterbox-tts requires numpy 1.24–1.25, which has no pre-built\n"
+                "wheels for Python 3.12 or newer.  Python 3.11 is required.\n\n"
+                "To enable voice cloning:\n"
+                "  1. Install Python 3.11:\n"
+                "     https://www.python.org/downloads/release/python-3119/\n\n"
+                "  2. Open a terminal and run:\n"
                 "     py -3.11 -m venv venv311\n"
                 "     venv311\\Scripts\\activate\n"
-                "     pip install -r requirements.txt\n"
+                "     pip install PyQt5 edge-tts pydub librosa soundfile numpy scipy langdetect mutagen\n"
                 "     pip install chatterbox-tts\n"
+                "     python app.py\n\n"
+                "The app works now with 400+ Microsoft Edge TTS neural voices.\n"
+                "Voice cloning (sounds like the reference speaker) needs Python 3.11."
             )
         return (
             "Install the voice cloning package by running setup.bat, or:\n\n"
@@ -211,8 +215,9 @@ class TTSEngine:
     def _generate_chatterbox(self, text: str, reference_audio: str, output_path: str):
         """Clone the voice in *reference_audio* and synthesise *text* via Chatterbox.
 
-        ChatterboxTTS supports Python 3.10+ (including 3.12) and runs on
-        CPU or GPU.  Downloads ~400 MB from HuggingFace on first use.
+        ChatterboxTTS supports Python 3.10–3.11.  On Python 3.12+ the required
+        numpy 1.24–1.25 wheels are unavailable, so this path raises ImportError
+        and the caller falls through to XTTS v2 or edge-tts.
 
         :raises ImportError: if the ``chatterbox-tts`` package is not installed.
         """
