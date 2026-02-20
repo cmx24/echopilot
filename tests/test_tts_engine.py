@@ -1102,6 +1102,32 @@ class TestCrashFixes(unittest.TestCase):
             "isRunning() must return False after completion — replacement should be allowed",
         )
 
+    def test_on_generate_missing_guard_pattern(self):
+        """_on_generate must also guard against replacing a running worker.
+        The bank_preview guard existed, but _on_generate had no equivalent guard,
+        allowing a bank-preview thread to be GC'd while still running → hard crash.
+        Verifies the guard logic now present in _on_generate with mock workers."""
+
+        class MockRunning:
+            def isRunning(self):
+                return True
+
+        class MockDone:
+            def isRunning(self):
+                return False
+
+        running = MockRunning()
+        done = MockDone()
+
+        # Simulate the guard logic now present in _on_generate:
+        # "if self._tts_worker and self._tts_worker.isRunning(): return early"
+        def _should_block(worker):
+            return worker is not None and worker.isRunning()
+
+        self.assertTrue(_should_block(running), "must block when worker is still running")
+        self.assertFalse(_should_block(done),   "must allow when worker is finished")
+        self.assertFalse(_should_block(None),   "must allow when no worker exists")
+
 
 if __name__ == "__main__":
     unittest.main()

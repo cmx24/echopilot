@@ -514,6 +514,16 @@ class EchoPilot(QMainWindow):
         return code.split("-")[0] or "en"
 
     def _on_generate(self):
+        # Guard: do not replace a still-running worker — GC of a live QThread crashes PyQt5.
+        # This can happen if a Bank tab preview is in progress and the user switches to
+        # Generate and clicks Generate before the preview thread finishes.
+        if self._tts_worker and self._tts_worker.isRunning():
+            QMessageBox.information(
+                self, "Busy",
+                "Please wait for the current operation to finish before generating.",
+            )
+            return
+
         text = self.gen_text.toPlainText().strip()
         if not text:
             QMessageBox.warning(self, "Empty Text", "Please enter some text to synthesise.")
@@ -622,8 +632,11 @@ class EchoPilot(QMainWindow):
         if not path:
             return
         fmt = "mp3" if path.lower().endswith(".mp3") else "wav"
-        self.engine.save_as(self._current_audio, path, fmt)
-        QMessageBox.information(self, "Saved", f"Saved to:\n{path}")
+        try:
+            self.engine.save_as(self._current_audio, path, fmt)
+            QMessageBox.information(self, "Saved", f"Saved to:\n{path}")
+        except Exception as exc:  # pydub raises various errors (CouldntEncodeError, OSError…)
+            QMessageBox.critical(self, "Save Error", str(exc))
 
     # ══════════════════════════════════════════════════════════════════════════
     # Tab 2 — Clone Voice
@@ -1266,8 +1279,11 @@ class EchoPilot(QMainWindow):
             f"Audio (*.{fmt});;All Files (*)",
         )
         if path:
-            self.engine.save_as(self._edit_audio, path, fmt)
-            self.edit_status.setText(f"✔ Saved: {os.path.basename(path)}")
+            try:
+                self.engine.save_as(self._edit_audio, path, fmt)
+                self.edit_status.setText(f"✔ Saved: {os.path.basename(path)}")
+            except Exception as exc:  # pydub raises various errors (CouldntEncodeError, OSError…)
+                QMessageBox.critical(self, "Export Error", str(exc))
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
