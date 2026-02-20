@@ -12,6 +12,7 @@ pyttsx3           # offline fallback using system TTS engine
 
 # Audio processing
 pydub             # manipulation, trim, speed, mp3/wav export
+audioop-lts       # backport of audioop removed in Python 3.13 (required by pydub on 3.13+)
 librosa           # audio analysis (gender detection via pitch)
 soundfile         # WAV I/O
 numpy

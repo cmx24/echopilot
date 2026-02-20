@@ -333,12 +333,15 @@ class TTSEngine:
 
     def _generate_edge(self, text: str, voice: str, output_path: str):
         """Synthesise with edge-tts and write a WAV to *output_path*."""
-        import edge_tts
+        import edge_tts  # noqa: F401 — imported for side-effects (verifies install)
 
         tmp_mp3 = output_path + ".tmp.mp3"
-        asyncio.run(self._edge_communicate(text, voice, tmp_mp3))
-        audio = AudioSegment.from_file(tmp_mp3, format="mp3")
-        os.remove(tmp_mp3)
+        try:
+            asyncio.run(self._edge_communicate(text, voice, tmp_mp3))
+            audio = AudioSegment.from_file(tmp_mp3, format="mp3")
+        finally:
+            if os.path.exists(tmp_mp3):
+                os.remove(tmp_mp3)
         audio.export(output_path, format="wav")
 
     @staticmethod

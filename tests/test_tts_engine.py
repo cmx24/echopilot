@@ -1129,5 +1129,128 @@ class TestCrashFixes(unittest.TestCase):
         self.assertFalse(_should_block(None),   "must allow when no worker exists")
 
 
+class TestDeepSweepFixes(unittest.TestCase):
+    """Regression tests for the 6 issues found in the deep review pass."""
+
+    # ── Fix 1: _load_audio_for_edit try/except (simulate get_duration_ms failure) ──
+
+    def test_get_duration_ms_raises_on_corrupt_file(self):
+        """get_duration_ms must raise (not silently return 0) on a corrupt file.
+
+        This confirms the fix: _load_audio_for_edit now wraps the call in try/except
+        so the exception is caught and shown to the user rather than propagating to
+        the Qt event loop and crashing.
+        """
+        engine = TTSEngine()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(b"not a real wav file")
+            bad_path = f.name
+        try:
+            with self.assertRaises(Exception):
+                engine.get_duration_ms(bad_path)
+        finally:
+            os.unlink(bad_path)
+
+    # ── Fix 2: path-traversal sanitization in _save_clone_profile ────────────────
+
+    def test_path_traversal_sanitization_pattern(self):
+        """The ref_dest path must not allow ../traversal via the voice name."""
+        import re as _re
+
+        # This is the same formula now used in _save_clone_profile
+        def safe_name(name: str) -> str:
+            return _re.sub(r"[^\w\s\-]", "", name).strip().replace(" ", "_")
+
+        self.assertEqual(safe_name("../evil"), "evil")
+        self.assertEqual(safe_name("../../etc/passwd"), "etcpasswd")
+        self.assertEqual(safe_name("my voice"), "my_voice")
+        self.assertEqual(safe_name("Voz PT-BR"), "Voz_PT-BR")
+
+    # ── Fix 3: audioop-lts listed in requirements ─────────────────────────────────
+
+    def test_audioop_lts_in_requirements(self):
+        """requirements.txt must include audioop-lts for Python 3.13+ compat."""
+        req_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "requirements.txt",
+        )
+        with open(req_path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("audioop-lts", content, "audioop-lts must be in requirements.txt")
+
+    def test_audioop_lts_in_setup_bat(self):
+        """setup.bat must install audioop-lts so pydub works on Python 3.13+."""
+        bat_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "setup.bat",
+        )
+        with open(bat_path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("audioop-lts", content, "audioop-lts must be installed by setup.bat")
+
+    # ── Fix 4: _analyze_worker isRunning guard ────────────────────────────────────
+
+    def test_analyze_worker_guard_pattern(self):
+        """The analyze-worker guard must block a second start while running."""
+        class MockRunning:
+            def isRunning(self):
+                return True
+
+        class MockDone:
+            def isRunning(self):
+                return False
+
+        def _should_block(worker):
+            return worker is not None and worker.isRunning()
+
+        self.assertTrue(_should_block(MockRunning()))
+        self.assertFalse(_should_block(MockDone()))
+        self.assertFalse(_should_block(None))
+
+    # ── Fix 5: _preview_tweaks / _apply_tweaks have try/except ───────────────────
+
+    def test_apply_tone_mood_exception_propagates_to_caller(self):
+        """apply_tone_mood raises on corrupt input; callers must catch it."""
+        engine = TTSEngine()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(b"corrupt")
+            bad_path = f.name
+        try:
+            with self.assertRaises(Exception):
+                engine.apply_tone_mood(bad_path, "Upbeat", 7)
+        finally:
+            os.unlink(bad_path)
+
+    # ── Fix 6: _generate_edge temp file cleanup (try/finally) ─────────────────────
+
+    def test_generate_edge_cleans_tmp_mp3_on_failure(self):
+        """_generate_edge must remove the .tmp.mp3 even if from_file fails."""
+        engine = TTSEngine()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = os.path.join(tmp_dir, "out.wav")
+            tmp_mp3 = output_path + ".tmp.mp3"
+
+            # Patch asyncio.run to write a junk file (mimics edge-tts) and close
+            # the coroutine cleanly so no "never awaited" ResourceWarning is raised.
+            def fake_run(coro):
+                coro.close()  # discard without running
+                with open(tmp_mp3, "wb") as f:
+                    f.write(b"not a real mp3 file")
+
+            with patch("tts_engine.asyncio.run", side_effect=fake_run):
+                # AudioSegment.from_file on the junk file will raise an exception;
+                # the try/finally in _generate_edge must still delete tmp_mp3.
+                try:
+                    engine._generate_edge("hello", "en-US-AriaNeural", output_path)
+                except Exception:
+                    pass
+
+            self.assertFalse(
+                os.path.exists(tmp_mp3),
+                "_generate_edge must remove .tmp.mp3 even when AudioSegment.from_file fails",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

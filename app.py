@@ -819,6 +819,9 @@ class EchoPilot(QMainWindow):
         path = self.clone_file_edit.text()
         if not path or not os.path.isfile(path):
             return
+        # Guard: do not start a second analysis while one is already running
+        if self._analyze_worker and self._analyze_worker.isRunning():
+            return
         self.clone_detect_btn.setEnabled(False)
         self.clone_gender_detected.setText("Detecting…")
         self._analyze_worker = AnalyzeWorker(self.vm, path)
@@ -888,7 +891,8 @@ class EchoPilot(QMainWindow):
             profiles_dir = os.path.join(BASE_DIR, "profiles")
             os.makedirs(profiles_dir, exist_ok=True)
             ext = os.path.splitext(ref_src)[1]
-            safe = name.replace(" ", "_")
+            # Sanitize name to prevent path-traversal; mirrors VoiceManager.save_custom_voice
+            safe = re.sub(r"[^\w\s\-]", "", name).strip().replace(" ", "_")
             ref_dest = os.path.join(profiles_dir, f"{safe}_ref{ext}")
             if os.path.abspath(ref_src) != os.path.abspath(ref_dest):
                 shutil.copy2(ref_src, ref_dest)
@@ -1182,11 +1186,20 @@ class EchoPilot(QMainWindow):
         else:
             QMessageBox.information(self, "No Audio", "Generate audio first in the Generate tab.")
 
+    @staticmethod
+    def _fmt_dur(dur_ms: int) -> str:
+        """Format *dur_ms* milliseconds as a human-readable duration label."""
+        return f"Duration: {dur_ms / 1000:.2f} s  ({dur_ms} ms)"
+
     def _load_audio_for_edit(self, path: str):
+        try:
+            dur = self.engine.get_duration_ms(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Error", f"Cannot read audio file:\n{exc}")
+            return
         self._edit_audio = path
         self.edit_file_edit.setText(path)
-        dur = self.engine.get_duration_ms(path)
-        self.edit_dur_label.setText(f"Duration: {dur / 1000:.2f} s  ({dur} ms)")
+        self.edit_dur_label.setText(self._fmt_dur(dur))
         for slider in (self.edit_start_slider, self.edit_end_slider):
             slider.setRange(0, dur)
         self.edit_start_slider.setValue(0)
@@ -1207,7 +1220,11 @@ class EchoPilot(QMainWindow):
         tmp = self._copy_edit_to_temp()
         tone = self.edit_tone_combo.currentText()
         mood = self.edit_mood_slider.value()
-        self.engine.apply_tone_mood(tmp, tone, mood)
+        try:
+            self.engine.apply_tone_mood(tmp, tone, mood)
+        except Exception as exc:
+            QMessageBox.warning(self, "Preview Error", str(exc))
+            return
         self.edit_status.setText(f"▶ Previewing: {tone}, mood {mood}")
         self._play_file(tmp)
 
@@ -1218,10 +1235,13 @@ class EchoPilot(QMainWindow):
         tmp = self._copy_edit_to_temp()
         tone = self.edit_tone_combo.currentText()
         mood = self.edit_mood_slider.value()
-        self.engine.apply_tone_mood(tmp, tone, mood)
+        try:
+            self.engine.apply_tone_mood(tmp, tone, mood)
+        except Exception as exc:
+            QMessageBox.warning(self, "Apply Error", str(exc))
+            return
         self._edit_audio = tmp
-        dur = self.engine.get_duration_ms(tmp)
-        self.edit_dur_label.setText(f"Duration: {dur / 1000:.2f} s  ({dur} ms)")
+        self.edit_dur_label.setText(self._fmt_dur(self.engine.get_duration_ms(tmp)))
         self.edit_status.setText(f"✔ Applied: {tone}, mood {mood}")
 
     def _copy_edit_to_temp(self) -> str:
@@ -1264,9 +1284,7 @@ class EchoPilot(QMainWindow):
         self.engine.trim_audio(tmp, start, end)
         self._edit_audio = tmp
         dur = self.engine.get_duration_ms(tmp)
-        self.edit_dur_label.setText(
-            f"Duration (trimmed): {dur / 1000:.2f} s  ({dur} ms)"
-        )
+        self.edit_dur_label.setText(f"Duration (trimmed): {dur / 1000:.2f} s  ({dur} ms)")
         self.edit_status.setText(f"✔ Trimmed to {start}–{end} ms")
         self._play_file(tmp)
 
