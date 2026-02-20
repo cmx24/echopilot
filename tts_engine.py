@@ -246,10 +246,21 @@ class TTSEngine:
 
         Downloads ~2 GB on first use (stored in the user's TTS model cache).
         Raises ``ImportError`` if the ``TTS`` package is not installed.
+
+        ``COQUI_TOS_AGREED=1`` is set automatically so the model loads
+        without an interactive Terms-of-Service prompt.
         """
         if self._xtts is None:
+            import torch  # noqa: PLC0415  – needed to detect CUDA availability
             from TTS.api import TTS as CoquiTTS  # noqa: PLC0415
-            self._xtts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2")
+            # Accept XTTS v2 Terms of Service non-interactively.
+            # Without this the library raises TosAgreementError on first load.
+            os.environ["COQUI_TOS_AGREED"] = "1"
+            gpu = torch.cuda.is_available()
+            self._xtts = CoquiTTS(
+                "tts_models/multilingual/multi-dataset/xtts_v2",
+                gpu=gpu,
+            )
         return self._xtts
 
     def _generate_xtts(self, text: str, reference_audio: str,

@@ -576,19 +576,26 @@ class EchoPilot(QMainWindow):
             label = "ChatterboxTTS" if backend == "chatterbox" else "XTTS v2"
             self.gen_status.setText(f"✔ Done — voice cloned with {label}")
         elif errors:
-            # Cloning was attempted but fell back; show actionable install instructions
+            # Cloning was attempted but fell back; show actionable information
             reason = errors[0].split(":")[0]   # e.g. "ChatterboxTTS not installed"
             self.gen_status.setText(f"⚠ Cloning failed ({reason}) — used {backend}")
-            # Only show the dialog once per session (not on every generate call)
-            if not self._cloning_warn_shown and any("not installed" in e for e in errors):
+            # Show the dialog once per session for ANY cloning failure
+            # (not just "not installed" — also covers TosAgreementError, CUDA errors, etc.)
+            if not self._cloning_warn_shown:
                 self._cloning_warn_shown = True
-                QMessageBox.warning(
-                    self,
-                    "Voice Cloning Not Available",
+                detail = "\n".join(f"  • {e}" for e in errors)
+                is_missing = any("not installed" in e for e in errors)
+                if is_missing:
+                    hint = TTSEngine.cloning_install_instructions()
+                else:
+                    hint = ("Re-run setup.bat if the error persists, or check your internet "
+                            "connection (XTTS v2 downloads ~2 GB on first use).")
+                body = (
                     "⚠  Voice cloning failed — the output uses a standard neural voice "
                     "and does NOT sound like your reference speaker.\n\n"
-                    + TTSEngine.cloning_install_instructions(),
+                    f"Error detail:\n{detail}\n\n{hint}"
                 )
+                QMessageBox.warning(self, "Voice Cloning Failed", body)
         else:
             self.gen_status.setText(f"✔ Done — {backend}")
 

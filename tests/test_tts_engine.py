@@ -802,3 +802,72 @@ class TestChatterboxEnglishOnly(unittest.TestCase):
                             language="en-US", reference_audio=ref)
         engine._generate_chatterbox.assert_called_once()
         engine._generate_xtts.assert_not_called()
+
+
+class TestXTTSTosAndGpu(unittest.TestCase):
+    """Confirm COQUI_TOS_AGREED is set and gpu is derived before TTS() is called."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        # Remove env var so each test starts clean
+        os.environ.pop("COQUI_TOS_AGREED", None)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        os.environ.pop("COQUI_TOS_AGREED", None)
+
+    def _make_fake_tts_module(self, captured: dict):
+        """Return a fake TTS.api module whose TTS() records constructor kwargs."""
+        class FakeTTS:
+            def __init__(self, model_name, gpu=None):
+                captured["model_name"] = model_name
+                captured["gpu"] = gpu
+                captured["tos_agreed"] = os.environ.get("COQUI_TOS_AGREED")
+        fake_api = MagicMock()
+        fake_api.TTS = FakeTTS
+        fake_module = MagicMock()
+        fake_module.api = fake_api
+        return fake_module
+
+    def test_tos_env_var_set_before_tts_instantiation(self):
+        """COQUI_TOS_AGREED must be '1' when TTS() is called."""
+        captured: dict = {}
+        fake_tts_module = self._make_fake_tts_module(captured)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._xtts = None
+
+        fake_torch = MagicMock()
+        fake_torch.cuda.is_available.return_value = False
+
+        with patch.dict("sys.modules", {
+            "torch": fake_torch,
+            "TTS": fake_tts_module,
+            "TTS.api": fake_tts_module.api,
+        }):
+            engine._get_xtts()
+
+        self.assertEqual(captured.get("tos_agreed"), "1",
+                         "COQUI_TOS_AGREED must be '1' at the moment TTS() is called")
+
+    def test_xtts_uses_cuda_availability_for_gpu_flag(self):
+        """_get_xtts must pass gpu=True when CUDA is available, gpu=False otherwise."""
+        for cuda_available, expected_gpu in [(True, True), (False, False)]:
+            with self.subTest(cuda=cuda_available):
+                captured: dict = {}
+                fake_tts_module = self._make_fake_tts_module(captured)
+
+                engine = TTSEngine.__new__(TTSEngine)
+                engine._xtts = None
+
+                fake_torch = MagicMock()
+                fake_torch.cuda.is_available.return_value = cuda_available
+
+                with patch.dict("sys.modules", {
+                    "torch": fake_torch,
+                    "TTS": fake_tts_module,
+                    "TTS.api": fake_tts_module.api,
+                }):
+                    engine._get_xtts()
+
+                self.assertEqual(captured.get("gpu"), expected_gpu)
