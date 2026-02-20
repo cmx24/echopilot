@@ -1,0 +1,28 @@
+name: Source ZIP
+
+on:
+  push:
+    branches: [ '**' ]
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create source ZIP
+        run: |
+          zip -r echopilot_source.zip \
+            app.py tts_engine.py voice_manager.py \
+            requirements.txt setup.bat run.bat \
+            src/ build/ REAME.md \
+            --exclude "*.pyc" --exclude "__pycache__/*"
+
+      - name: Upload source ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: echopilot_source
+          path: echopilot_source.zip
+          retention-days: 30
