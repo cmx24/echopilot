@@ -2,12 +2,13 @@
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -30,6 +31,12 @@ from PyQt5.QtWidgets import (
     QWidget,
     QTabWidget,
 )
+
+try:
+    from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+    _HAS_QTMULTIMEDIA = True
+except (ImportError, RuntimeError):
+    _HAS_QTMULTIMEDIA = False
 
 from tts_engine import TTSEngine, TONES
 from voice_manager import VoiceManager
@@ -132,6 +139,22 @@ class EchoPilot(QMainWindow):
         self._tts_worker: TTSWorker = None
         self._analyze_worker: AnalyzeWorker = None
         self._play_proc: subprocess.Popen = None
+        self._font_size: int = 13
+
+        # In-app audio player (avoids launching the system media app)
+        if _HAS_QTMULTIMEDIA:
+            try:
+                self._player = QMediaPlayer()
+                self._player.error.connect(
+                    lambda e: QMessageBox.warning(
+                        self, "Playback Error",
+                        self._player.errorString() or f"Playback error {e}",
+                    )
+                )
+            except Exception:
+                self._player = None
+        else:
+            self._player = None
 
         tabs = QTabWidget()
         self.setCentralWidget(tabs)
@@ -144,8 +167,17 @@ class EchoPilot(QMainWindow):
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _play_file(self, path: str):
-        """Play an audio file using the best available system player."""
+        """Play *path* inside the app via QMediaPlayer; subprocess fallback on Linux/macOS."""
         self._stop_playback()
+        if not path or not os.path.isfile(path):
+            return
+        if self._player is not None:
+            self._player.setMedia(
+                QMediaContent(QUrl.fromLocalFile(os.path.abspath(path)))
+            )
+            self._player.play()
+            return
+        # Subprocess fallback (Linux / macOS — these don't open a GUI window)
         system = platform.system()
         try:
             if system == "Linux":
@@ -166,18 +198,53 @@ class EchoPilot(QMainWindow):
                 )
             elif system == "Darwin":
                 self._play_proc = subprocess.Popen(["afplay", path])
-            else:
-                try:
-                    os.startfile(path)
-                except OSError as exc:
-                    QMessageBox.warning(self, "Playback Error", str(exc))
         except Exception as exc:
             QMessageBox.warning(self, "Playback Error", str(exc))
 
     def _stop_playback(self):
+        if self._player is not None:
+            self._player.stop()
         if self._play_proc and self._play_proc.poll() is None:
             self._play_proc.terminate()
         self._play_proc = None
+
+    # ── Zoom support (Ctrl + mouse-wheel) ─────────────────────────────────────
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            self._font_size = max(9, min(24, self._font_size + (1 if delta > 0 else -1)))
+            self._apply_font_size()
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def _apply_font_size(self):
+        style = re.sub(r'font-size:\s*\d+px', f'font-size: {self._font_size}px', self._STYLE)
+        self.setStyleSheet(style)
+
+    # ── Voice helpers ─────────────────────────────────────────────────────────
+
+    def _best_builtin_voice(self, language: str, gender: str) -> str:
+        """Return the short_name of the best built-in voice for *language* / *gender*.
+
+        Tries in order: exact language+gender → same language any gender →
+        any language same gender → absolute default.
+        """
+        valid_gender = gender if gender in ("Female", "Male") else None
+        valid_lang = language if language and language not in ("Unknown", "All", "") else None
+        for lg, gd in (
+            (valid_lang, valid_gender),
+            (valid_lang, None),
+            (None, valid_gender),
+        ):
+            voices = [
+                v for v in self.vm.get_all_voices(gender=gd, language=lg)
+                if v["type"] == "builtin"
+            ]
+            if voices:
+                return voices[0]["short_name"]
+        return "en-US-AriaNeural"
 
     @staticmethod
     def _hbox(*widgets) -> QHBoxLayout:
@@ -325,16 +392,16 @@ class EchoPilot(QMainWindow):
             return
 
         if voice_data.get("type") == "custom":
+            language = voice_data.get("language", "")
+            gender = voice_data.get("gender", "")
+            short_name = self._best_builtin_voice(language, gender)
             ref = voice_data.get("reference_audio", "")
-            if not ref or not os.path.isfile(ref):
-                QMessageBox.information(
-                    self, "Custom Voice — No Reference Audio",
-                    "This custom voice profile has no reference audio file.\n\n"
-                    "Neural voice cloning (XTTS v2 / OpenVoice) requires a reference\n"
-                    "audio file to be set when saving the profile.\n\n"
-                    "Falling back to the default built-in voice for now.",
-                )
-            short_name = "en-US-AriaNeural"
+            hint = (
+                f"ℹ Using closest match: {short_name}"
+                if ref and os.path.isfile(ref) else
+                f"ℹ No reference audio — using {short_name}"
+            )
+            self.gen_status.setText(hint)
         else:
             short_name = voice_data.get("short_name", "en-US-AriaNeural")
 
