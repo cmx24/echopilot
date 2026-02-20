@@ -24,6 +24,12 @@ python -m pip install --upgrade pip
 python -m pip install PyQt5 edge-tts pydub librosa soundfile numpy scipy langdetect mutagen
 
 echo.
+echo Installing Chatterbox TTS (voice cloning, Python 3.10+)...
+echo NOTE: ~400 MB model is downloaded from HuggingFace on first use of Clone Voice.
+echo.
+python -m pip install chatterbox-tts
+
+echo.
 
 REM Coqui TTS (XTTS v2 voice cloning) only supports Python 3.9-3.11.
 REM Detect version and install only when compatible.

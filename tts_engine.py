@@ -23,7 +23,8 @@ _TONE_PARAMS = {
 class TTSEngine:
     def __init__(self):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        self._xtts = None  # Coqui XTTS v2 instance, loaded on demand
+        self._xtts = None         # Coqui XTTS v2 instance, loaded on demand
+        self._chatterbox = None   # ChatterboxTTS instance, loaded on demand
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -35,10 +36,14 @@ class TTSEngine:
         """
         Synthesise *text* using *voice_short_name* (edge-tts voice ID).
 
-        When *reference_audio* is a valid file path, Coqui XTTS v2 is used
-        for zero-shot voice cloning so the output sounds like the speaker in
-        the recording.  Falls back to edge-tts when the ``TTS`` package is not
-        installed, and to pyttsx3 when edge-tts is unavailable.
+        When *reference_audio* is a valid file path, voice cloning is attempted:
+
+        1. **ChatterboxTTS** — zero-shot cloning, Python 3.10+, GPU/CPU,
+           pulls from HuggingFace on first use (~400 MB).
+        2. **Coqui XTTS v2** — zero-shot cloning, Python 3.9–3.11 only,
+           ~2 GB model.  Used when ChatterboxTTS is unavailable.
+        3. **edge-tts** — neural TTS without cloning (fallback).
+        4. **pyttsx3** — offline system TTS (last resort).
 
         :param tone:            One of TONES; applies speed/volume post-processing.
         :param mood:            1–10 scale; 5 is neutral (no extra effect).
@@ -50,7 +55,19 @@ class TTSEngine:
             fd, output_path = tempfile.mkstemp(suffix=".wav", dir=OUTPUT_DIR)
             os.close(fd)
 
-        # 1. Try XTTS v2 voice cloning when a reference recording is available
+        # 1. Try Chatterbox voice cloning (Python 3.10+, works on 3.12)
+        if reference_audio and os.path.isfile(reference_audio):
+            try:
+                self._generate_chatterbox(text, reference_audio, output_path)
+                if tone != "Normal" or mood != 5:
+                    self._apply_tone_mood(output_path, tone, mood)
+                return output_path
+            except ImportError:
+                pass  # chatterbox-tts not installed → try XTTS v2
+            except Exception:
+                pass  # Chatterbox inference error → try XTTS v2
+
+        # 2. Try Coqui XTTS v2 (Python 3.9–3.11 only)
         if reference_audio and os.path.isfile(reference_audio):
             try:
                 self._generate_xtts(text, reference_audio, language, output_path)
@@ -62,11 +79,11 @@ class TTSEngine:
             except Exception:
                 pass  # XTTS inference error → fall through to edge-tts
 
-        # 2. edge-tts (primary neural voices)
+        # 3. edge-tts (primary neural voices)
         try:
             self._generate_edge(text, voice_short_name, output_path)
         except Exception as edge_err:
-            # 3. pyttsx3 offline fallback
+            # 4. pyttsx3 offline fallback
             try:
                 self._generate_pyttsx3(text, output_path)
             except Exception as tts_err:
@@ -119,7 +136,38 @@ class TTSEngine:
 
     # ── Backends ─────────────────────────────────────────────────────────────
 
-    # XTlanguage codes accepted by XTTS v2
+    # ── Chatterbox TTS (primary cloning backend, Python 3.10+) ───────────────
+
+    def _get_chatterbox(self):
+        """Lazy-load and cache the ChatterboxTTS model.
+
+        Downloads ~400 MB from HuggingFace on first use.
+        Raises ``ImportError`` if the ``chatterbox-tts`` package is not installed.
+        """
+        if self._chatterbox is None:
+            from chatterbox.tts import ChatterboxTTS  # noqa: PLC0415
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._chatterbox = ChatterboxTTS.from_pretrained(device=device)
+        return self._chatterbox
+
+    def _generate_chatterbox(self, text: str, reference_audio: str, output_path: str):
+        """Clone the voice in *reference_audio* and synthesise *text* via Chatterbox.
+
+        ChatterboxTTS supports Python 3.10+ (including 3.12) and runs on
+        CPU or GPU.  Downloads ~400 MB from HuggingFace on first use.
+
+        :raises ImportError: if the ``chatterbox-tts`` package is not installed.
+        """
+        import soundfile as sf  # noqa: PLC0415
+
+        tts = self._get_chatterbox()
+        wav = tts.generate(text, audio_prompt_path=reference_audio)
+        sf.write(output_path, wav.squeeze().numpy(), tts.sr)
+
+    # ── XTTS v2 (secondary cloning backend, Python 3.9–3.11 only) ────────────
+
+    # Language codes accepted by XTTS v2
     _XTTS_LANGUAGES = {
         "en", "es", "fr", "de", "it", "pt", "pl", "tr",
         "ru", "nl", "cs", "ar", "zh-cn", "ja", "hu", "ko",

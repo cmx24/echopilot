@@ -236,15 +236,104 @@ class TestTTSEngineAudioOps(unittest.TestCase):
         self.assertEqual(result, out)
         self.assertTrue(os.path.isfile(out))
 
+    # ── Chatterbox routing (primary cloning backend) ─────────────────────────
+
+    def test_generate_uses_chatterbox_when_reference_audio_provided(self):
+        """Chatterbox must be the first cloning attempt when ref audio exists."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_cb"), exist_ok=True)
+        ref = self._wav("ref_cb.wav", 3000)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
+        engine._xtts = None
+        engine._generate_chatterbox = MagicMock(
+            side_effect=lambda t, r, p: _make_wav(p, 500)
+        )
+        engine._generate_xtts = MagicMock()   # must NOT be called
+        engine._generate_edge = MagicMock()   # must NOT be called
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_cb")):
+            result = engine.generate("Hello", "en-US-AriaNeural", reference_audio=ref)
+
+        engine._generate_chatterbox.assert_called_once()
+        engine._generate_xtts.assert_not_called()
+        engine._generate_edge.assert_not_called()
+        self.assertTrue(os.path.isfile(result))
+
+    def test_generate_falls_back_to_xtts_when_chatterbox_import_error(self):
+        """ImportError from Chatterbox → try XTTS v2 next."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_cbfb"), exist_ok=True)
+        ref = self._wav("ref_cbfb.wav", 3000)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
+        engine._xtts = None
+        engine._generate_chatterbox = MagicMock(
+            side_effect=ImportError("chatterbox-tts not installed")
+        )
+        engine._generate_xtts = MagicMock(
+            side_effect=lambda t, r, l, p: _make_wav(p, 500)
+        )
+        engine._generate_edge = MagicMock()
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_cbfb")):
+            result = engine.generate("Hello", "en-US-AriaNeural", reference_audio=ref)
+
+        engine._generate_chatterbox.assert_called_once()
+        engine._generate_xtts.assert_called_once()
+        engine._generate_edge.assert_not_called()
+        self.assertTrue(os.path.isfile(result))
+
+    def test_generate_falls_back_to_edge_when_both_cloners_fail(self):
+        """If both Chatterbox and XTTS fail, edge-tts must be used."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_bothfail"), exist_ok=True)
+        ref = self._wav("ref_bothfail.wav", 3000)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
+        engine._xtts = None
+        engine._generate_chatterbox = MagicMock(side_effect=ImportError("no chatterbox"))
+        engine._generate_xtts = MagicMock(side_effect=ImportError("no TTS"))
+        engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_bothfail")):
+            result = engine.generate("Hello", "en-US-AriaNeural", reference_audio=ref)
+
+        engine._generate_chatterbox.assert_called_once()
+        engine._generate_xtts.assert_called_once()
+        engine._generate_edge.assert_called_once()
+        self.assertTrue(os.path.isfile(result))
+
+    def test_generate_skips_cloning_when_reference_audio_missing(self):
+        """No reference audio → neither Chatterbox nor XTTS called."""
+        os.makedirs(os.path.join(self.tmp_dir, "output_noref2"), exist_ok=True)
+
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
+        engine._xtts = None
+        engine._generate_chatterbox = MagicMock()
+        engine._generate_xtts = MagicMock()
+        engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
+
+        with patch("tts_engine.OUTPUT_DIR", os.path.join(self.tmp_dir, "output_noref2")):
+            engine.generate("Hello", "en-US-AriaNeural",
+                            reference_audio="/nonexistent/path.wav")
+
+        engine._generate_chatterbox.assert_not_called()
+        engine._generate_xtts.assert_not_called()
+        engine._generate_edge.assert_called_once()
+
     # ── XTTS routing ─────────────────────────────────────────────────────────
 
     def test_generate_uses_xtts_when_reference_audio_provided(self):
-        """When reference_audio exists, _generate_xtts must be called."""
+        """When reference_audio exists and Chatterbox fails, XTTS must be called."""
         os.makedirs(os.path.join(self.tmp_dir, "output_xtts"), exist_ok=True)
         ref = self._wav("ref.wav", 3000)
 
         engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
         engine._xtts = None
+        engine._generate_chatterbox = MagicMock(side_effect=ImportError("no cb"))
         engine._generate_xtts = MagicMock(side_effect=lambda t, r, l, p: _make_wav(p, 500))
         engine._generate_edge = MagicMock()  # must NOT be called
 
@@ -261,7 +350,9 @@ class TestTTSEngineAudioOps(unittest.TestCase):
         ref = self._wav("ref_fb.wav", 3000)
 
         engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
         engine._xtts = None
+        engine._generate_chatterbox = MagicMock(side_effect=ImportError("no cb"))
         engine._generate_xtts = MagicMock(side_effect=ImportError("TTS not installed"))
         engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
 
@@ -277,7 +368,9 @@ class TestTTSEngineAudioOps(unittest.TestCase):
         ref = self._wav("ref_err.wav", 3000)
 
         engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
         engine._xtts = None
+        engine._generate_chatterbox = MagicMock(side_effect=ImportError("no cb"))
         engine._generate_xtts = MagicMock(side_effect=RuntimeError("CUDA OOM"))
         engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
 
@@ -292,7 +385,9 @@ class TestTTSEngineAudioOps(unittest.TestCase):
         os.makedirs(os.path.join(self.tmp_dir, "output_noref"), exist_ok=True)
 
         engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
         engine._xtts = None
+        engine._generate_chatterbox = MagicMock()
         engine._generate_xtts = MagicMock()
         engine._generate_edge = MagicMock(side_effect=lambda t, v, p: _make_wav(p, 500))
 
@@ -309,7 +404,9 @@ class TestTTSEngineAudioOps(unittest.TestCase):
         ref = self._wav("ref_lang.wav", 3000)
 
         engine = TTSEngine.__new__(TTSEngine)
+        engine._chatterbox = None
         engine._xtts = None
+        engine._generate_chatterbox = MagicMock(side_effect=ImportError("no cb"))
         captured = {}
         def fake_xtts(text, reference_audio, language, output_path):
             captured["language"] = language
@@ -326,3 +423,4 @@ class TestTTSEngineAudioOps(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

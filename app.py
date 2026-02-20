@@ -411,7 +411,7 @@ class EchoPilot(QMainWindow):
                 params["reference_audio"] = ref
                 params["language"] = lang_code
                 self.gen_status.setText(
-                    "⏳ Cloning voice… (requires TTS package; Python 3.9–3.11 only)"
+                    "⏳ Cloning voice… (first run downloads model ~400 MB)"
                 )
             else:
                 self.gen_status.setText(f"ℹ No reference audio — using {short_name}")
